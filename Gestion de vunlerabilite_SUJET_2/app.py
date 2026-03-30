@@ -1,46 +1,44 @@
 #!/usr/bin/env python3
 # ============================================================
 #  SUJET 2 — GESTION DES VULNÉRABILITÉS
-#  Module Vulnérabilités · OpenVAS · Nikto · Analyse rapport
-#  Application PyQt5 professionnelle
-#  Palette : Blanc / Vert (success) / Noir
+#  Cycle complet : Découvrir → Classifier → Évaluer →
+#                  Rapporter → Corriger → Vérifier
+#  6 onglets dédiés + rapport PDF structuré par cible
 #  Compatible : Kali Linux / Ubuntu — Python 3.8+
 # ============================================================
+#  INSTALLATION :
+#    sudo apt install nikto gvm whatweb nmap python3-pyqt5
+#    pip install reportlab --break-system-packages
+#  LANCEMENT :
+#    python3 app.py
+# ============================================================
 
-import sys
-import subprocess
-import os
-import re
+import sys, subprocess, os, re
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QLineEdit, QTextEdit, QFrame,
-    QScrollArea, QStackedWidget, QProgressBar, QComboBox
+    QLabel, QPushButton, QLineEdit, QTextEdit, QFrame, QScrollArea,
+    QProgressBar, QComboBox, QFileDialog, QMessageBox, QTabWidget,
+    QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QColor, QPalette
+from PyQt5.QtGui import QFont, QColor, QPalette, QBrush
 
-
-# ──────────────────────────────────────────────
-#  PALETTE DE COULEURS
-# ──────────────────────────────────────────────
+# ══════════════════════════════════════════════
+#  PALETTE
+# ══════════════════════════════════════════════
 C = {
     "bg_main":        "#0A0E1A",
     "bg_card":        "#111827",
     "bg_sidebar":     "#0D1424",
     "bg_input":       "#1A2035",
-    "blue_primary":   "#3B6CF4",
-    "blue_light":     "#5B8AF5",
-    "blue_dark":      "#2451C4",
-    "blue_glow":      "#1E3A8A",
     "white":          "#FFFFFF",
     "white_80":       "#CCDDFF",
     "white_60":       "#8899CC",
     "white_40":       "#4A5568",
     "border":         "#1E2D4A",
-    "border_blue":    "#2451C4",
-    "success":        "#10B981",  # Vert principal pour ce module
+    "success":        "#10B981",
     "success_light":  "#34D399",
     "success_dark":   "#059669",
     "success_glow":   "#064E3B",
@@ -48,922 +46,1454 @@ C = {
     "danger":         "#EF4444",
     "text_primary":   "#F0F6FF",
     "text_secondary": "#8899CC",
-    "purple":         "#A855F7",
 }
 
+# Couleur distinctive par étape
+STEP_COLORS = {
+    0: ("#3B82F6", "#1E3A8A"),
+    1: ("#A855F7", "#3B0764"),
+    2: ("#F59E0B", "#78350F"),
+    3: ("#10B981", "#064E3B"),
+    4: ("#EF4444", "#7F1D1D"),
+    5: ("#06B6D4", "#164E63"),
+    6: ("#FCFDFD", "#030C1F"),
+}
+STEP_NAMES = ["Découvrir", "Classifier", "Évaluer",
+              "Rapporter",  "Corriger",   "Vérifier"]
+STEP_ICONS = ["🔍", "📂", "📊", "📝", "🔧", "✅"]
+STEP_DESCS = [
+    "Identifier les actifs et services exposés sur la cible",
+    "Prioriser les actifs selon leur criticité et leur impact",
+    "Analyser et scorer chaque vulnérabilité (CVSS)",
+    "Générer le rapport complet structuré par cible",
+    "Appliquer les correctifs et mesures de remédiation",
+    "Rescanner la cible pour valider les corrections",
+]
 
-# ──────────────────────────────────────────────
-#  GÉNÉRATEUR PDF AUTOMATIQUE
-# ──────────────────────────────────────────────
-def generate_pdf_report(module_name, command, raw_output, output_path):
-    """
-    Génère automatiquement un rapport PDF après l'exécution d'un module.
-    Capture la sortie brute du terminal et produit un fichier PDF structuré.
-    """
+# ══════════════════════════════════════════════
+#  VALIDATION
+# ══════════════════════════════════════════════
+def is_valid_target(t):
+    if re.match(r'^https?://', t):
+        return True
+    if re.match(r'^\d{1,3}(\.\d{1,3}){3}(:\d+)?$', t):
+        parts = t.split(':')[0].split('.')
+        return all(0 <= int(p) <= 255 for p in parts)
+    if re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{1,253}$', t):
+        return True
+    return False
+
+# ══════════════════════════════════════════════
+#  PARSEURS
+# ══════════════════════════════════════════════
+def parse_discover(raw):
+    ports, services, os_info = [], [], "Non détecté"
+    for line in raw.split('\n'):
+        m = re.match(r'(\d+/\w+)\s+open\s+(\S+)(.*)', line)
+        if m:
+            ports.append(m.group(1))
+            services.append((m.group(1), m.group(2), m.group(3).strip()[:60] or "—"))
+        if re.search(r'OS details?:|Running:', line, re.I):
+            os_info = line.strip()
+    return ports, services, os_info
+
+def parse_classify(raw, services):
+    HIGH = {'21','22','23','25','80','110','135','139','143','443','445',
+            '3306','3389','5900','8080','8443','53'}
+    classified = []
+    for port_proto, svc, banner in services:
+        port = port_proto.split('/')[0]
+        if port in HIGH or svc.lower() in ('ftp','ssh','telnet','http','https','smb','rdp','mysql'):
+            level, color = "HAUTE",   "#EF4444"
+        elif svc.lower() in ('dns','smtp','pop3','imap','snmp'):
+            level, color = "MOYENNE", "#F59E0B"
+        else:
+            level, color = "FAIBLE",  "#10B981"
+        classified.append((port_proto, svc, banner, level, color))
+    return classified
+
+def parse_evaluate(raw):
+    vulns, seen = [], set()
+    for line in raw.split('\n'):
+        cve   = re.findall(r'CVE-\d{4}-\d{4,7}', line, re.I)
+        osvdb = re.findall(r'OSVDB-\d+', line, re.I)
+        refs  = cve + osvdb
+        lo    = line.lower()
+        if refs or any(w in lo for w in ['vuln','xss','sql injection','lfi','rfi',
+                                          'directory traversal','csrf','injection',
+                                          'outdated','+ /','nikto']):
+            key = line.strip()[:80]
+            if key in seen or not line.strip():
+                continue
+            seen.add(key)
+            if any(w in lo for w in ['critical','critique','sql injection','rce']):
+                score, color = "CRITIQUE", "#C0392B"
+            elif any(w in lo for w in ['high','xss','lfi','rfi','traversal','csrf']):
+                score, color = "HAUTE",    "#E67E22"
+            elif any(w in lo for w in ['medium','moyen','outdated','version']):
+                score, color = "MOYENNE",  "#F1C40F"
+            else:
+                score, color = "INFO",     "#2980B9"
+            vulns.append((score, color, ', '.join(refs) if refs else "—", line.strip()[:120]))
+    return vulns
+
+def parse_remediation(vulns, classified):
+    actions = []
+    for score, color, ref, desc in vulns:
+        lo = desc.lower()
+        if 'sql' in lo or 'injection' in lo:
+            actions.append((score, color, ref,
+                "Utiliser des requêtes paramétrées. Désactiver l'affichage des erreurs SQL."))
+        elif 'xss' in lo or 'cross' in lo:
+            actions.append((score, color, ref,
+                "Encoder toutes les sorties HTML. Implémenter Content-Security-Policy (CSP)."))
+        elif 'outdated' in lo or 'old' in lo or 'version' in lo:
+            actions.append((score, color, ref,
+                "Mettre à jour le composant vers la dernière version stable."))
+        elif 'ftp' in lo or '21' in lo:
+            actions.append((score, color, ref,
+                "Désactiver FTP anonyme. Migrer vers SFTP (port 22)."))
+        elif 'telnet' in lo or '23' in lo:
+            actions.append((score, color, ref,
+                "Désactiver Telnet. Utiliser SSH (port 22) chiffré."))
+        elif 'rdp' in lo or '3389' in lo:
+            actions.append((score, color, ref,
+                "Restreindre RDP derrière un VPN. Activer NLA (Network Level Auth)."))
+        elif 'smb' in lo or '445' in lo or '139' in lo:
+            actions.append((score, color, ref,
+                "Désactiver SMBv1. Appliquer MS17-010. Bloquer ports 139/445 en périmètre."))
+        elif 'directory' in lo or 'traversal' in lo:
+            actions.append((score, color, ref,
+                "Désactiver le listage de répertoires dans la config du serveur web."))
+        else:
+            actions.append((score, color, ref,
+                f"Analyser et appliquer le correctif fournisseur : {desc[:60]}..."))
+    for port_proto, svc, banner, level, _ in classified:
+        if level == "HAUTE":
+            port = port_proto.split('/')[0]
+            if not any(port in a[3] or svc.lower() in a[3].lower() for a in actions):
+                actions.append(("HAUTE", "#E67E22", "—",
+                    f"Port {port_proto} ({svc}) exposé — vérifier la nécessité "
+                    f"d'exposition publique et restreindre par pare-feu si non requis."))
+    return actions[:12]
+
+# ══════════════════════════════════════════════
+#  RAPPORT PDF — 6 SECTIONS PAR CIBLE
+# ══════════════════════════════════════════════
+def generate_pdf_report(target, step_results, output_path):
     try:
         from reportlab.lib.pagesizes import A4
-        from reportlab.lib import colors as rl_colors
+        from reportlab.lib import colors as rc
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.units import cm
         from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
-                                         Table, TableStyle, HRFlowable)
+                                         Table, TableStyle, HRFlowable, PageBreak)
         from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
-        # ── Palette couleurs pour module Vulnérabilités (vert) ──────────────
-        hdr_col, acc_col, bg_col = ("#1A5276", "#27AE60", "#EAFAF1")
-
-        doc = SimpleDocTemplate(
-            output_path, pagesize=A4,
-            leftMargin=2*cm, rightMargin=2*cm,
-            topMargin=2*cm, bottomMargin=2*cm
-        )
+        doc = SimpleDocTemplate(output_path, pagesize=A4,
+                                leftMargin=2*cm, rightMargin=2*cm,
+                                topMargin=2.2*cm, bottomMargin=2*cm)
         styles = getSampleStyleSheet()
         story  = []
 
-        # ── Styles ────────────────────────────────────────────────────────────
-        title_s = ParagraphStyle('T', parent=styles['Title'],
-                                  fontSize=18, alignment=TA_CENTER,
-                                  textColor=rl_colors.HexColor(hdr_col),
-                                  spaceAfter=4)
-        h1 = ParagraphStyle('H1', parent=styles['Heading1'],
-                              fontSize=12, textColor=rl_colors.HexColor(hdr_col),
-                              spaceBefore=10, spaceAfter=4,
-                              backColor=rl_colors.HexColor(bg_col), borderPad=4)
-        h2 = ParagraphStyle('H2', parent=styles['Heading2'],
-                              fontSize=10, textColor=rl_colors.HexColor(acc_col),
-                              spaceBefore=6, spaceAfter=3)
-        normal = ParagraphStyle('N', parent=styles['Normal'],
-                                 fontSize=9, leading=13)
-        small  = ParagraphStyle('S', parent=styles['Normal'],
-                                 fontSize=8, leading=12)
-        code_s = ParagraphStyle('C', parent=styles['Code'],
-                                 fontSize=8, leading=12,
-                                 backColor=rl_colors.HexColor('#1C2833'),
-                                 textColor=rl_colors.HexColor('#00FF7F'),
-                                 leftIndent=8, rightIndent=8, borderPad=6)
-        footer_s = ParagraphStyle('F', parent=small,
-                                   alignment=TA_CENTER,
-                                   textColor=rl_colors.HexColor('#888888'))
+        def ps(name, **kw):
+            return ParagraphStyle(name, parent=styles['Normal'], **kw)
 
-        # ── En-tête ───────────────────────────────────────────────────────────
-        story.append(Paragraph(f"RAPPORT — {module_name.upper()}", title_s))
-        story.append(Paragraph("CyberSec Tool — FAFA12 | Rapport automatique post-exécution",
-                                ParagraphStyle('Sub', parent=small, alignment=TA_CENTER,
-                                               textColor=rl_colors.HexColor('#888888'))))
-        story.append(HRFlowable(width="100%", thickness=2,
-                                 color=rl_colors.HexColor(hdr_col)))
-        story.append(Spacer(1, 0.3*cm))
+        title_s  = ps('TT', fontSize=19, alignment=TA_CENTER,
+                       textColor=rc.HexColor('#1A5276'), spaceAfter=2,
+                       fontName='Helvetica-Bold')
+        sub_s    = ps('SS', fontSize=9, alignment=TA_CENTER,
+                       textColor=rc.HexColor('#888888'), spaceAfter=4)
+        target_s = ps('TS', fontSize=13, alignment=TA_CENTER,
+                       textColor=rc.HexColor('#27AE60'), spaceAfter=2,
+                       fontName='Helvetica-Bold')
+        h2       = ps('H2', fontSize=10, fontName='Helvetica-Bold',
+                       textColor=rc.HexColor('#2C3E50'), spaceBefore=6, spaceAfter=3)
+        normal   = ps('N',  fontSize=9,  leading=13)
+        small    = ps('S',  fontSize=8,  leading=12)
+        footer_s = ps('F',  fontSize=7.5, alignment=TA_CENTER,
+                       textColor=rc.HexColor('#AAAAAA'))
+        ok_s     = ps('OK', fontSize=9, textColor=rc.HexColor('#27AE60'),
+                       fontName='Helvetica-Bold')
 
-        meta = [
-            ["Module",    module_name],
-            ["Commande",  command],
-            ["Date",      datetime.now().strftime("%d/%m/%Y  %H:%M:%S")],
-            ["Rapport",   output_path],
-        ]
+        now_str = datetime.now().strftime("%d/%m/%Y à %H:%M:%S")
+
+        # ── PAGE DE COUVERTURE ────────────────────────────────────────────────
+        story.append(Spacer(1, 1.2*cm))
+        story.append(Paragraph("RAPPORT DE GESTION DES VULNÉRABILITÉS", title_s))
+        story.append(Paragraph(
+            "Cycle complet : Découvrir → Classifier → Évaluer → Rapporter → Corriger → Vérifier",
+            sub_s))
+        story.append(HRFlowable(width="100%", thickness=2, color=rc.HexColor('#1A5276')))
+        story.append(Spacer(1, 0.4*cm))
+
+        cb = Table([[Paragraph(f"🎯  Cible : {target}", target_s)]], colWidths=[16*cm])
+        cb.setStyle(TableStyle([
+            ('BACKGROUND', (0,0),(-1,-1), rc.HexColor('#EAFAF1')),
+            ('BOX',        (0,0),(-1,-1), 1.5, rc.HexColor('#27AE60')),
+            ('PADDING',    (0,0),(-1,-1), 10),
+            ('ALIGN',      (0,0),(-1,-1), 'CENTER'),
+        ]))
+        story.append(cb)
+        story.append(Spacer(1, 0.5*cm))
+
+        meta = [["Date", now_str], ["Outil", "CyberSec Tool — FAFA12"],
+                ["Auteur", "Groupe 7 — Sujet 2"], ["Rapport", output_path]]
         mt = Table(meta, colWidths=[3.5*cm, 12.5*cm])
         mt.setStyle(TableStyle([
-            ('BACKGROUND',  (0, 0), (0, -1), rl_colors.HexColor(hdr_col)),
-            ('TEXTCOLOR',   (0, 0), (0, -1), rl_colors.white),
-            ('FONTNAME',    (0, 0), (0, -1), 'Helvetica-Bold'),
-            ('FONTNAME',    (1, 0), (1, -1), 'Helvetica'),
-            ('FONTSIZE',    (0, 0), (-1, -1), 8.5),
-            ('ROWBACKGROUNDS', (1, 0), (1, -1),
-             [rl_colors.HexColor(bg_col), rl_colors.white]),
-            ('GRID',  (0, 0), (-1, -1), 0.4, rl_colors.HexColor('#BDC3C7')),
-            ('PADDING', (0, 0), (-1, -1), 5),
+            ('BACKGROUND', (0,0),(0,-1), rc.HexColor('#1A5276')),
+            ('TEXTCOLOR',  (0,0),(0,-1), rc.white),
+            ('FONTNAME',   (0,0),(0,-1), 'Helvetica-Bold'),
+            ('FONTSIZE',   (0,0),(-1,-1), 8.5),
+            ('ROWBACKGROUNDS', (1,0),(1,-1),
+             [rc.HexColor('#EAFAF1'), rc.white]),
+            ('GRID',   (0,0),(-1,-1), 0.4, rc.HexColor('#BDC3C7')),
+            ('PADDING',(0,0),(-1,-1), 5),
         ]))
         story.append(mt)
-        story.append(Spacer(1, 0.4*cm))
+        story.append(Spacer(1, 0.5*cm))
 
-        # ── Sortie brute du terminal ──────────────────────────────────────────
-        story.append(Paragraph("1. Sortie de l'outil (terminal)", h1))
-        story.append(Paragraph("Commande exécutée :", h2))
-        story.append(Paragraph(command, code_s))
-        story.append(Spacer(1, 0.2*cm))
-        story.append(Paragraph("Résultat complet :", h2))
+        # Tableau résumé du cycle
+        story.append(Paragraph("Résumé du cycle d'analyse", h2))
+        cycle_rows = [["Étape", "Nom", "Statut"]]
+        for i, (name, icon) in enumerate(zip(STEP_NAMES, STEP_ICONS)):
+            has = bool(step_results.get(i, {}).get('raw', '').strip())
+            cycle_rows.append([f"{icon} Étape {i+1}", name,
+                                "✔ Réalisé" if has else "– Non exécuté"])
+        ct = Table(cycle_rows, colWidths=[3.5*cm, 5*cm, 7.5*cm])
+        ct.setStyle(TableStyle([
+            ('BACKGROUND', (0,0),(-1,0), rc.HexColor('#2C3E50')),
+            ('TEXTCOLOR',  (0,0),(-1,0), rc.white),
+            ('FONTNAME',   (0,0),(-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE',   (0,0),(-1,-1), 8.5),
+            ('ROWBACKGROUNDS', (0,1),(-1,-1),
+             [rc.HexColor('#F8F9FA'), rc.white]),
+            ('GRID',   (0,0),(-1,-1), 0.4, rc.HexColor('#DEE2E6')),
+            ('PADDING',(0,0),(-1,-1), 5),
+        ]))
+        story.append(ct)
 
-        # Nettoyer les balises HTML du terminal Qt
-        clean = re.sub(r'<[^>]+>', '', raw_output)
-        clean = clean.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+        # ══════════════════════════════════════════════
+        #  6 SECTIONS — UNE PAR ÉTAPE
+        # ══════════════════════════════════════════════
+        for step_idx in range(6):
+            story.append(PageBreak())
+            name   = STEP_NAMES[step_idx]
+            icon   = STEP_ICONS[step_idx]
+            desc   = STEP_DESCS[step_idx]
+            accent, dark = STEP_COLORS[step_idx]
+            sdata  = step_results.get(step_idx, {})
+            raw    = sdata.get('raw', '').strip()
+            parsed = sdata.get('data', {})
 
-        # Découper en lignes et coloriser
-        lines = [l.rstrip() for l in clean.split('\n') if l.strip()]
-        if not lines:
-            lines = ["(Aucune sortie capturée)"]
-
-        for line in lines[:200]:   # max 200 lignes dans le PDF
-            lo = line.lower()
-            if any(w in lo for w in ['error', 'erreur', 'failed', 'critical', 'CRITIQUE']):
-                tc = rl_colors.HexColor('#E74C3C')
-            elif any(w in lo for w in ['warning', 'warn', 'avertissement']):
-                tc = rl_colors.HexColor('#E67E22')
-            elif any(w in lo for w in ['open', 'found', 'detected', 'ok', 'succes', 'pass', 'vuln']):
-                tc = rl_colors.HexColor('#27AE60')
-            elif any(w in lo for w in ['info', 'note', 'suggestion']):
-                tc = rl_colors.HexColor('#2980B9')
-            else:
-                tc = rl_colors.HexColor('#2C3E50')
-            story.append(Paragraph(
-                line.replace('<', '&lt;').replace('>', '&gt;'),
-                ParagraphStyle('L', parent=small, textColor=tc,
-                               fontName='Courier', spaceAfter=1)
-            ))
-
-        if len(lines) > 200:
-            story.append(Paragraph(
-                f"... {len(lines)-200} lignes supplémentaires (voir terminal)",
-                ParagraphStyle('More', parent=small,
-                               textColor=rl_colors.HexColor('#888888'),
-                               fontName='Helvetica-Oblique')))
-
-        story.append(Spacer(1, 0.4*cm))
-
-        # ── Analyse et recommandations pour Vulnérabilités ────────────────────
-        story.append(Paragraph("2. Analyse et Interprétation", h1))
-        analysis, recommendations = _get_analysis(module_name, command, clean)
-        story.append(Paragraph(analysis, normal))
-        story.append(Spacer(1, 0.3*cm))
-
-        story.append(Paragraph("3. Recommandations", h1))
-        for i, rec in enumerate(recommendations, 1):
-            prio, text = rec
-            pc = ('#C0392B' if prio == 'CRITIQUE' else
-                  '#E67E22' if prio == 'HAUTE' else
-                  '#F1C40F' if prio == 'MOYENNE' else '#27AE60')
-            row = Table([[
-                Paragraph(f"<b>{prio}</b>",
-                           ParagraphStyle('RP', parent=small, textColor=rl_colors.white,
-                                          fontName='Helvetica-Bold', alignment=TA_CENTER)),
-                Paragraph(f"{i}. {text}", normal),
-            ]], colWidths=[2.5*cm, 13.5*cm])
-            row.setStyle(TableStyle([
-                ('BACKGROUND',  (0, 0), (0, 0), rl_colors.HexColor(pc)),
-                ('PADDING',     (0, 0), (-1, -1), 5),
-                ('BOX',         (0, 0), (-1, -1), 0.5, rl_colors.HexColor(pc)),
-                ('VALIGN',      (0, 0), (-1, -1), 'MIDDLE'),
-                ('GRID',        (0, 0), (-1, -1), 0.3, rl_colors.HexColor('#D5D8DC')),
+            # Bandeau d'en-tête
+            hdr_tbl = Table([[Paragraph(
+                f"<font color='white'><b>{icon}  Étape {step_idx+1} — {name.upper()}</b></font>",
+                ps('HB', fontSize=14, fontName='Helvetica-Bold',
+                   textColor=rc.white, alignment=TA_LEFT)
+            )]], colWidths=[16*cm])
+            hdr_tbl.setStyle(TableStyle([
+                ('BACKGROUND', (0,0),(-1,-1), rc.HexColor(dark)),
+                ('BOX',        (0,0),(-1,-1), 2, rc.HexColor(accent)),
+                ('PADDING',    (0,0),(-1,-1), 10),
             ]))
-            story.append(row)
+            story.append(hdr_tbl)
+            story.append(Paragraph(desc,
+                ps('DC', fontSize=9, textColor=rc.HexColor('#555'),
+                   spaceBefore=4, spaceAfter=6)))
+            story.append(HRFlowable(width="100%", thickness=1.5,
+                                     color=rc.HexColor(accent)))
             story.append(Spacer(1, 0.15*cm))
+            story.append(Paragraph(f"Cible analysée : <b>{target}</b>", normal))
+            story.append(Spacer(1, 0.2*cm))
 
-        # ── Pied de page ──────────────────────────────────────────────────────
-        story.append(Spacer(1, 0.4*cm))
+            if not raw:
+                story.append(Paragraph(
+                    f"⚠ Étape « {name} » non exécutée pour cette cible.",
+                    ps('NE', fontSize=9, textColor=rc.HexColor('#888'),
+                       fontName='Helvetica-Oblique')))
+                continue
+
+            # ── ÉTAPE 1 — DÉCOUVRIR ──────────────────────────────────────────
+            if step_idx == 0:
+                ports    = parsed.get('ports', [])
+                services = parsed.get('services', [])
+                os_info  = parsed.get('os', 'Non détecté')
+                story.append(Paragraph("Résultats de la découverte réseau", h2))
+                story.append(Paragraph(
+                    f"Nmap a découvert <b>{len(ports)} port(s) ouvert(s)</b> "
+                    f"sur <b>{target}</b>. OS détecté : <b>{os_info}</b>.", normal))
+                story.append(Spacer(1, 0.25*cm))
+                if services:
+                    story.append(Paragraph("Tableau des ports et services :", h2))
+                    td = [["Port/Proto", "Service", "Bannière / Version"]]
+                    for p, s, b in services:
+                        td.append([p, s, b])
+                    st = Table(td, colWidths=[3*cm, 3.5*cm, 9.5*cm])
+                    st.setStyle(TableStyle([
+                        ('BACKGROUND', (0,0),(-1,0), rc.HexColor('#1A5276')),
+                        ('TEXTCOLOR',  (0,0),(-1,0), rc.white),
+                        ('FONTNAME',   (0,0),(-1,0), 'Helvetica-Bold'),
+                        ('FONTSIZE',   (0,0),(-1,-1), 8),
+                        ('ROWBACKGROUNDS', (0,1),(-1,-1),
+                         [rc.HexColor('#EBF5FB'), rc.white]),
+                        ('GRID',   (0,0),(-1,-1), 0.4, rc.HexColor('#BDC3C7')),
+                        ('PADDING',(0,0),(-1,-1), 4),
+                    ]))
+                    story.append(st)
+                else:
+                    story.append(Paragraph("Aucun service identifié.", normal))
+
+            # ── ÉTAPE 2 — CLASSIFIER ─────────────────────────────────────────
+            elif step_idx == 1:
+                classified = parsed.get('classified', [])
+                story.append(Paragraph("Classification des actifs par criticité", h2))
+                high = [c for c in classified if c[3]=="HAUTE"]
+                med  = [c for c in classified if c[3]=="MOYENNE"]
+                low  = [c for c in classified if c[3]=="FAIBLE"]
+                story.append(Paragraph(
+                    f"<b>{len(classified)}</b> service(s) sur <b>{target}</b> — "
+                    f"<font color='red'><b>{len(high)} haute(s)</b></font>, "
+                    f"<font color='orange'><b>{len(med)} moyenne(s)</b></font>, "
+                    f"<font color='green'><b>{len(low)} faible(s)</b></font>.", normal))
+                story.append(Spacer(1, 0.25*cm))
+                if classified:
+                    td = [["Port/Proto", "Service", "Bannière", "Criticité"]]
+                    for port, svc, banner, level, color in classified:
+                        td.append([port, svc, banner, level])
+                    rs = [
+                        ('BACKGROUND', (0,0),(-1,0), rc.HexColor('#6C3483')),
+                        ('TEXTCOLOR',  (0,0),(-1,0), rc.white),
+                        ('FONTNAME',   (0,0),(-1,0), 'Helvetica-Bold'),
+                        ('FONTSIZE',   (0,0),(-1,-1), 8),
+                        ('GRID',   (0,0),(-1,-1), 0.4, rc.HexColor('#BDC3C7')),
+                        ('PADDING',(0,0),(-1,-1), 4),
+                    ]
+                    for i, (_, _, _, level, color) in enumerate(classified, 1):
+                        rs.append(('TEXTCOLOR', (3,i),(3,i), rc.HexColor(color)))
+                        rs.append(('FONTNAME',  (3,i),(3,i), 'Helvetica-Bold'))
+                        bg = (rc.HexColor('#FFF5F5') if level=="HAUTE" else
+                              rc.HexColor('#FFFDE7') if level=="MOYENNE" else
+                              rc.HexColor('#F0FFF4'))
+                        rs.append(('BACKGROUND', (0,i),(-1,i), bg))
+                    cl = Table(td, colWidths=[3*cm, 3*cm, 7*cm, 3*cm])
+                    cl.setStyle(TableStyle(rs))
+                    story.append(cl)
+
+            # ── ÉTAPE 3 — ÉVALUER ────────────────────────────────────────────
+            elif step_idx == 2:
+                vulns = parsed.get('vulns', [])
+                story.append(Paragraph("Évaluation des vulnérabilités", h2))
+                story.append(Paragraph(
+                    f"<b>{len(vulns)}</b> vulnérabilité(s)/problème(s) détecté(s) "
+                    f"sur <b>{target}</b>.", normal))
+                story.append(Spacer(1, 0.2*cm))
+                if vulns:
+                    n_c = sum(1 for v in vulns if v[0]=='CRITIQUE')
+                    n_h = sum(1 for v in vulns if v[0]=='HAUTE')
+                    n_m = sum(1 for v in vulns if v[0]=='MOYENNE')
+                    n_i = sum(1 for v in vulns if v[0]=='INFO')
+                    res = Table(
+                        [["CRITIQUE","HAUTE","MOYENNE","INFO"],
+                         [str(n_c), str(n_h), str(n_m), str(n_i)]],
+                        colWidths=[4*cm]*4)
+                    res.setStyle(TableStyle([
+                        ('BACKGROUND',(0,0),(0,0),rc.HexColor('#C0392B')),
+                        ('BACKGROUND',(1,0),(1,0),rc.HexColor('#E67E22')),
+                        ('BACKGROUND',(2,0),(2,0),rc.HexColor('#F1C40F')),
+                        ('BACKGROUND',(3,0),(3,0),rc.HexColor('#2980B9')),
+                        ('TEXTCOLOR', (0,0),(-1,0),rc.white),
+                        ('FONTNAME',  (0,0),(-1,0),'Helvetica-Bold'),
+                        ('FONTSIZE',  (0,0),(-1,-1),11),
+                        ('FONTNAME',  (0,1),(-1,1),'Helvetica-Bold'),
+                        ('ALIGN',     (0,0),(-1,-1),'CENTER'),
+                        ('PADDING',   (0,0),(-1,-1),7),
+                        ('INNERGRID', (0,0),(-1,-1),0.5,rc.HexColor('#BDC3C7')),
+                        ('BOX',       (0,0),(-1,-1),1,rc.HexColor('#BDC3C7')),
+                    ]))
+                    story.append(res)
+                    story.append(Spacer(1, 0.25*cm))
+                    td = [["Sévérité","Référence","Description"]]
+                    for score, color, ref, desc_t in vulns[:20]:
+                        td.append([score, ref, desc_t])
+                    rs = [
+                        ('BACKGROUND',(0,0),(-1,0),rc.HexColor('#D35400')),
+                        ('TEXTCOLOR', (0,0),(-1,0),rc.white),
+                        ('FONTNAME',  (0,0),(-1,0),'Helvetica-Bold'),
+                        ('FONTSIZE',  (0,0),(-1,-1),7.5),
+                        ('GRID',  (0,0),(-1,-1),0.4,rc.HexColor('#BDC3C7')),
+                        ('PADDING',(0,0),(-1,-1),4),
+                    ]
+                    for i,(score,color,_,_) in enumerate(vulns[:20],1):
+                        rs.append(('TEXTCOLOR',(0,i),(0,i),rc.HexColor(color)))
+                        rs.append(('FONTNAME', (0,i),(0,i),'Helvetica-Bold'))
+                        bg = (rc.HexColor('#FFF5F5') if score=='CRITIQUE' else
+                              rc.HexColor('#FFF8EC') if score=='HAUTE'    else
+                              rc.HexColor('#FFFFF0') if score=='MOYENNE'  else
+                              rc.HexColor('#EEF6FF'))
+                        rs.append(('BACKGROUND',(1,i),(-1,i),bg))
+                    vt = Table(td, colWidths=[2.5*cm, 3*cm, 10.5*cm])
+                    vt.setStyle(TableStyle(rs))
+                    story.append(vt)
+                else:
+                    story.append(Paragraph("✔ Aucune vulnérabilité référencée détectée.", ok_s))
+
+            # ── ÉTAPE 4 — RAPPORTER ──────────────────────────────────────────
+            elif step_idx == 3:
+                all_vulns  = step_results.get(2,{}).get('data',{}).get('vulns',[])
+                all_class  = step_results.get(1,{}).get('data',{}).get('classified',[])
+                all_ports  = step_results.get(0,{}).get('data',{}).get('ports',[])
+                crits      = [v for v in all_vulns if v[0]=='CRITIQUE']
+                hautes     = [v for v in all_vulns if v[0]=='HAUTE']
+
+                story.append(Paragraph("Rapport de synthèse par cible", h2))
+                story.append(Paragraph(
+                    f"Synthèse complète sur <b>{target}</b> :<br/>"
+                    f"• <b>{len(all_ports)}</b> port(s) ouvert(s)<br/>"
+                    f"• <b>{len(all_class)}</b> service(s) classifié(s)<br/>"
+                    f"• <b>{len(all_vulns)}</b> vulnérabilité(s) évaluée(s)<br/>"
+                    f"• <b>{len(crits)}</b> CRITIQUE(S) — action immédiate<br/>"
+                    f"• <b>{len(hautes)}</b> HAUTE(S) — correction urgente", normal))
+                story.append(Spacer(1, 0.25*cm))
+
+                if crits:
+                    risk_text  = "🔴 CRITIQUE — Action immédiate requise"
+                    risk_color = "#C0392B"
+                elif hautes:
+                    risk_text  = "🟠 ÉLEVÉ — Correction urgente recommandée"
+                    risk_color = "#E67E22"
+                elif all_vulns:
+                    risk_text  = "🟡 MODÉRÉ — Correctifs à planifier"
+                    risk_color = "#D4AC0D"
+                else:
+                    risk_text  = "🟢 FAIBLE — Aucune vulnérabilité critique"
+                    risk_color = "#27AE60"
+
+                risk_tbl = Table([[Paragraph(
+                    f"<b>Niveau de risque global : {risk_text}</b>",
+                    ps('RK', fontSize=11, fontName='Helvetica-Bold',
+                       textColor=rc.HexColor(risk_color), alignment=TA_CENTER)
+                )]], colWidths=[16*cm])
+                risk_tbl.setStyle(TableStyle([
+                    ('BOX',     (0,0),(-1,-1), 2, rc.HexColor(risk_color)),
+                    ('PADDING', (0,0),(-1,-1), 10),
+                ]))
+                story.append(risk_tbl)
+                if crits:
+                    story.append(Spacer(1, 0.25*cm))
+                    story.append(Paragraph("Vulnérabilités critiques prioritaires :", h2))
+                    for _, color, ref, desc_t in crits[:5]:
+                        story.append(Paragraph(
+                            f"⚠ <b>[{ref}]</b> {desc_t[:100]}",
+                            ps('CV', fontSize=9, textColor=rc.HexColor('#C0392B'),
+                               leftIndent=10)))
+
+            # ── ÉTAPE 5 — CORRIGER ───────────────────────────────────────────
+            elif step_idx == 4:
+                actions = parsed.get('actions', [])
+                story.append(Paragraph("Plan de remédiation et correctifs", h2))
+                story.append(Paragraph(
+                    f"<b>{len(actions)}</b> action(s) corrective(s) pour <b>{target}</b>.",
+                    normal))
+                story.append(Spacer(1, 0.2*cm))
+                if actions:
+                    for i,(score,color,ref,action) in enumerate(actions,1):
+                        row_t = Table([[
+                            Paragraph(f"<b>{score}</b>",
+                                       ps('SP',fontSize=8,textColor=rc.white,
+                                          fontName='Helvetica-Bold',alignment=TA_CENTER)),
+                            Paragraph(f"<b>{ref}</b>",
+                                       ps('SR',fontSize=8,textColor=rc.HexColor('#2C3E50'))),
+                            Paragraph(f"{i}. {action}", normal),
+                        ]], colWidths=[2.2*cm, 2.8*cm, 11*cm])
+                        row_t.setStyle(TableStyle([
+                            ('BACKGROUND',(0,0),(0,0),rc.HexColor(color)),
+                            ('PADDING',   (0,0),(-1,-1),5),
+                            ('BOX',       (0,0),(-1,-1),0.5,rc.HexColor(color)),
+                            ('VALIGN',    (0,0),(-1,-1),'TOP'),
+                            ('GRID',      (0,0),(-1,-1),0.3,rc.HexColor('#D5D8DC')),
+                        ]))
+                        story.append(row_t)
+                        story.append(Spacer(1, 0.1*cm))
+                else:
+                    story.append(Paragraph("✔ Aucune action corrective requise.", ok_s))
+
+            # ── ÉTAPE 6 — VÉRIFIER ───────────────────────────────────────────
+            elif step_idx == 5:
+                ports_before = step_results.get(0,{}).get('data',{}).get('ports',[])
+                vulns_before = step_results.get(2,{}).get('data',{}).get('vulns',[])
+                ports_after  = parsed.get('ports', [])
+                vulns_after  = parse_evaluate(raw)
+
+                story.append(Paragraph("Vérification post-correction", h2))
+                story.append(Paragraph(
+                    f"Réscan de vérification sur <b>{target}</b> — comparaison avant/après.",
+                    normal))
+                story.append(Spacer(1, 0.2*cm))
+
+                comp = [
+                    ["Indicateur","Avant correction","Après correction","Évolution"],
+                    ["Ports ouverts", str(len(ports_before)), str(len(ports_after)),
+                     "✔ Réduit" if len(ports_after)<len(ports_before) else
+                     "= Identique" if len(ports_after)==len(ports_before) else "✗ Augmenté"],
+                    ["Vulnérabilités", str(len(vulns_before)), str(len(vulns_after)),
+                     "✔ Réduit" if len(vulns_after)<len(vulns_before) else
+                     "= Identique" if len(vulns_after)==len(vulns_before) else "✗ Augmenté"],
+                ]
+                comp_tbl = Table(comp, colWidths=[4.5*cm,3.5*cm,3.5*cm,4.5*cm])
+                comp_tbl.setStyle(TableStyle([
+                    ('BACKGROUND',(0,0),(-1,0),rc.HexColor('#1ABC9C')),
+                    ('TEXTCOLOR', (0,0),(-1,0),rc.white),
+                    ('FONTNAME',  (0,0),(-1,0),'Helvetica-Bold'),
+                    ('FONTSIZE',  (0,0),(-1,-1),9),
+                    ('ROWBACKGROUNDS',(0,1),(-1,-1),
+                     [rc.HexColor('#E8F8F5'),rc.white]),
+                    ('GRID',  (0,0),(-1,-1),0.4,rc.HexColor('#BDC3C7')),
+                    ('PADDING',(0,0),(-1,-1),6),
+                    ('ALIGN', (0,0),(-1,-1),'CENTER'),
+                ]))
+                story.append(comp_tbl)
+                story.append(Spacer(1, 0.3*cm))
+
+                if len(vulns_after)<len(vulns_before) or len(ports_after)<len(ports_before):
+                    concl = "✔ Corrections efficaces — le niveau de risque a diminué."
+                    cc    = "#27AE60"
+                elif not vulns_before and not ports_before:
+                    concl = "ℹ Aucune référence disponible — exécuter d'abord les étapes 1 et 3."
+                    cc    = "#2980B9"
+                else:
+                    concl = "⚠ Certaines vulnérabilités persistent — reprendre le cycle."
+                    cc    = "#E67E22"
+                story.append(Paragraph(f"<b>{concl}</b>",
+                    ps('CL',fontSize=10,textColor=rc.HexColor(cc),
+                       fontName='Helvetica-Bold')))
+
+            # ── Sortie brute ─────────────────────────────────────────────────
+            story.append(Spacer(1, 0.3*cm))
+            story.append(Paragraph("Sortie brute de l'outil :", h2))
+            lines = [l.rstrip() for l in raw.split('\n') if l.strip()][:50]
+            for line in lines:
+                lo = line.lower()
+                if any(w in lo for w in ['error','failed','critical']):
+                    tc = rc.HexColor('#E74C3C')
+                elif any(w in lo for w in ['warning','warn']):
+                    tc = rc.HexColor('#E67E22')
+                elif any(w in lo for w in ['open','found','vuln','ok']):
+                    tc = rc.HexColor('#27AE60')
+                else:
+                    tc = rc.HexColor('#2C3E50')
+                story.append(Paragraph(
+                    line.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;'),
+                    ParagraphStyle('RL', parent=small, textColor=tc,
+                                   fontName='Courier', spaceAfter=1)))
+            if len(lines) == 50:
+                story.append(Paragraph("... (tronqué — voir terminal)",
+                    ps('tr', fontSize=7.5, fontName='Helvetica-Oblique',
+                       textColor=rc.HexColor('#888888'))))
+
+        # Pied de page
+        story.append(Spacer(1, 0.5*cm))
         story.append(HRFlowable(width="100%", thickness=1,
-                                 color=rl_colors.HexColor('#BDC3C7')))
+                                 color=rc.HexColor('#BDC3C7')))
         story.append(Paragraph(
-            f"Généré automatiquement le {datetime.now().strftime('%d/%m/%Y à %H:%M')} "
-            f"par CyberSec Tool — FAFA12  |  Module : {module_name}",
+            f"Rapport généré le {now_str} — CyberSec Tool FAFA12 — Cible : {target}",
             footer_s))
 
         doc.build(story)
         return True, output_path
 
     except Exception as e:
-        return False, str(e)
+        import traceback
+        return False, traceback.format_exc()
 
-
-def _get_analysis(module_name, command, output_text):
-    """Retourne (texte_analyse, liste_recommandations) pour le module Vulnérabilités."""
-
-    # Analyse pour outils de vulnérabilités (Nikto, OpenVAS, Nmap NSE, WhatWeb)
-    vulns = re.findall(r'(?:OSVDB|CVE|vuln|Vuln|vulnerability|Vulnerability)[^\n]*', output_text)
-    n_vulns = len(vulns)
-
-    # Compter aussi les problèmes de sécurité détectés
-    issues = re.findall(r'(?:Issue|Problem|Finding|Alert|Risk|High|Medium|Critical)[^\n]*', output_text, re.I)
-
-    analysis = (
-        f"L'analyse de vulnérabilités a identifié <b>{n_vulns} vulnérabilité(s) référencée(s)</b> "
-        f"et <b>{len(issues)} problème(s) de sécurité détecté(s)</b>. "
-        "Le cycle de gestion des vulnérabilités (découverte → classification → correction → "
-        "vérification) doit être appliqué immédiatement sur les éléments détectés. "
-        "Prioriser selon le score CVSS : critique (≥9.0), élevé (7.0-8.9), moyen (4.0-6.9). "
-        "Les vulnérabilités web identifiées par Nikto nécessitent une revue de code et "
-        "une mise à jour des composants concernés."
-    )
-
-    recs = [
-        ("CRITIQUE", "Appliquer immédiatement les correctifs pour les CVE critiques (CVSS ≥ 9.0)."),
-        ("HAUTE",    "Relancer le scan après chaque correction pour valider l'élimination."),
-        ("HAUTE",    "Désactiver les modules/services inutiles identifiés par l'outil."),
-        ("MOYENNE",  "Intégrer les scans de vulnérabilité dans le pipeline CI/CD."),
-        ("MOYENNE",  "Mettre en place une veille CVE (https://nvd.nist.gov) pour les technologies utilisées."),
-        ("FAIBLE",   "Documenter chaque vulnérabilité dans un registre de suivi avec état de correction."),
-    ]
-
-    # Alertes spécifiques selon l'outil utilisé
-    if "nikto" in command.lower():
-        if "xss" in output_text.lower() or "cross" in output_text.lower():
-            recs.insert(0, ("CRITIQUE", "Vulnérabilités XSS détectées — implémenter l'encodage de sortie et CSP."))
-        if "sql" in output_text.lower() or "injection" in output_text.lower():
-            recs.insert(0, ("CRITIQUE", "Injection SQL détectée — utiliser des requêtes paramétrées immédiatement."))
-        if "outdated" in output_text.lower() or "old" in output_text.lower():
-            recs.insert(0, ("HAUTE", "Logiciels obsolètes détectés — planifier la mise à jour des composants."))
-
-    if "openvas" in command.lower() or "gvm" in command.lower():
-        recs.insert(0, ("HAUTE", "Configurer OpenVAS pour des scans réguliers automatiques (cron hebdomadaire)."))
-
-    if "whatweb" in command.lower():
-        recs.insert(0, ("MOYENNE", "Masquer les bannières de version des serveurs web détectés."))
-
-    return analysis, recs[:7]
-
-
-def make_global_style():
-    bg   = C["bg_main"]
-    txt  = C["text_primary"]
-    card = C["bg_card"]
-    inp  = C["bg_input"]
-    bp   = C["blue_primary"]
-    bl   = C["blue_light"]
-    bd   = C["blue_dark"]
-    wh   = C["white"]
-    return (
-        "QMainWindow, QWidget {"
-        "  background-color: " + bg + ";"
-        "  color: " + txt + ";"
-        "  font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;"
-        "  font-size: 14px;"
-        "}"
-        "QScrollBar:vertical {"
-        "  background: " + card + "; width: 6px; border-radius: 3px;"
-        "}"
-        "QScrollBar::handle:vertical {"
-        "  background: " + C["success"] + "; border-radius: 3px; min-height: 30px;"
-        "}"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
-        "QScrollBar:horizontal {"
-        "  background: " + card + "; height: 6px; border-radius: 3px;"
-        "}"
-        "QScrollBar::handle:horizontal {"
-        "  background: " + C["success"] + "; border-radius: 3px;"
-        "}"
-        "QToolTip {"
-        "  background-color: " + card + "; color: " + wh + ";"
-        "  border: 1px solid " + C["success"] + "; border-radius: 6px; padding: 6px 10px; font-size: 13px;"
-        "}"
-        "QProgressBar {"
-        "  background-color: " + inp + "; border: none; border-radius: 4px; height: 6px;"
-        "}"
-        "QProgressBar::chunk {"
-        "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-        "    stop:0 " + C["success_dark"] + ", stop:1 " + C["success_light"] + ");"
-        "  border-radius: 4px;"
-        "}"
-    )
-
-
-def combo_style(hover_color):
-    bg   = C["bg_input"]
-    txt  = C["text_primary"]
-    brd  = C["border"]
-    card = C["bg_card"]
-    return (
-        "QComboBox {"
-        "  background-color: " + bg + ";"
-        "  color: " + txt + ";"
-        "  border: 1px solid " + brd + ";"
-        "  border-radius: 8px;"
-        "  padding: 8px 14px;"
-        "  font-size: 13px;"
-        "}"
-        "QComboBox:hover { border-color: " + hover_color + "; }"
-        "QComboBox::drop-down { border: none; width: 30px; }"
-        "QComboBox QAbstractItemView {"
-        "  background: " + card + ";"
-        "  color: " + txt + ";"
-        "  border: 1px solid " + hover_color + ";"
-        "  border-radius: 8px;"
-        "  selection-background-color: " + hover_color + ";"
-        "}"
-    )
-
-
-# ──────────────────────────────────────────────
+# ══════════════════════════════════════════════
 #  THREAD D'EXÉCUTION
-# ──────────────────────────────────────────────
+# ══════════════════════════════════════════════
 class CommandThread(QThread):
     output_signal   = pyqtSignal(str)
-    finished_signal = pyqtSignal(bool)
+    finished_signal = pyqtSignal(bool, str)
     progress_signal = pyqtSignal(int)
 
-    def __init__(self, command, parent=None):
-        super().__init__(parent)
+    def __init__(self, command):
+        super().__init__()
         self.command    = command
         self._running   = True
         self.raw_output = ""
 
     def run(self):
-        ts  = datetime.now().strftime("%H:%M:%S")
-        col = C["success_light"]
+        ts = datetime.now().strftime("%H:%M:%S")
         self.output_signal.emit(
-            "<span style='color:" + col + ";'>"
-            "<br>[" + ts + "] Exécution : " + self.command + "</span><br>"
-        )
+            f"<span style='color:{C['success_light']};'><br>"
+            f"[{ts}] ▶ {self.command}</span><br>")
         self.progress_signal.emit(10)
-
         try:
             process = subprocess.Popen(
                 self.command, shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True, bufsize=1
-            )
-            progress = 10
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
+            prog = 10
             for line in iter(process.stdout.readline, ""):
                 if not self._running:
-                    process.terminate()
-                    break
-                stripped = line.rstrip()
-                if stripped:
-                    self.raw_output += stripped + "\n"
-                    self.output_signal.emit(self._colorize(stripped) + "<br>")
-                    if progress < 90:
-                        progress += 2
-                        self.progress_signal.emit(progress)
-
+                    process.terminate(); break
+                s = line.rstrip()
+                if s:
+                    self.raw_output += s + "\n"
+                    self.output_signal.emit(self._col(s) + "<br>")
+                    if prog < 90:
+                        prog = min(90, prog + 1)
+                        self.progress_signal.emit(prog)
             process.wait()
             self.progress_signal.emit(100)
-            self.finished_signal.emit(process.returncode == 0)
-
+            self.finished_signal.emit(process.returncode == 0, self.raw_output)
         except FileNotFoundError:
             tool = self.command.split()[0]
-            msg  = f"[ERREUR] Outil '{tool}' non trouvé.\nInstallez-le : sudo apt install {tool}"
+            msg  = f"[ERREUR] '{tool}' non trouvé.\n→ sudo apt install {tool}"
             self.raw_output += msg
             self.output_signal.emit(
-                "<span style='color:" + C["danger"] + ";'>"
-                + msg.replace("\n", "<br>") + "</span><br>"
-            )
-            self.finished_signal.emit(False)
-
+                f"<span style='color:{C['danger']};'>{msg.replace(chr(10),'<br>')}</span><br>")
+            self.finished_signal.emit(False, self.raw_output)
         except Exception as e:
-            msg = f"[ERREUR] {str(e)}"
+            msg = f"[ERREUR] {e}"
             self.raw_output += msg
             self.output_signal.emit(
-                "<span style='color:" + C["danger"] + ";'>"
-                + msg + "</span><br>"
-            )
-            self.finished_signal.emit(False)
+                f"<span style='color:{C['danger']};'>{msg}</span><br>")
+            self.finished_signal.emit(False, self.raw_output)
 
-    def _colorize(self, line):
+    def _col(self, line):
         lo = line.lower()
-        if any(w in lo for w in ["error", "erreur", "failed", "critical"]):
-            color = C["danger"]
-        elif any(w in lo for w in ["warning", "warn"]):
-            color = C["warning"]
-        elif any(w in lo for w in ["vuln", "found", "detected", "open", "ok", "pass"]):
-            color = C["success"]
-        elif any(w in lo for w in ["info", "suggestion", "note"]):
-            color = C["success_light"]
-        else:
-            color = C["text_primary"]
-        return "<span style='color:" + color + ";'>" + line + "</span>"
+        c  = (C["danger"]        if any(w in lo for w in ["error","erreur","failed","critical"]) else
+              C["warning"]       if any(w in lo for w in ["warning","warn"]) else
+              C["success"]       if any(w in lo for w in ["vuln","found","detected","open","ok"]) else
+              C["success_light"] if any(w in lo for w in ["info","note"]) else
+              C["text_primary"])
+        esc = line.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+        return f"<span style='color:{c};'>{esc}</span>"
 
     def stop(self):
         self._running = False
 
-
-# ──────────────────────────────────────────────
-#  COMPOSANTS UI
-# ──────────────────────────────────────────────
-
-class GlowButton(QPushButton):
-    def __init__(self, text, icon_char="", primary=True, accent_color=None, parent=None):
-        super().__init__(parent)
-        self.setText(("  " + icon_char + "  " + text) if icon_char else text)
-
-        # Couleur d'accentuation (vert par défaut pour ce module)
-        if accent_color is None:
-            accent_color = C["success"]
-
-        acc_dark = C["success_dark"]
-        acc_light = C["success_light"]
-        acc_glow = C["success_glow"]
-        wh = C["white"]
-        w4 = C["white_40"]
-        w6 = C["white_60"]
-
-        if primary:
-            self.setStyleSheet(
-                "QPushButton {"
-                "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-                "    stop:0 " + acc_dark + ", stop:1 " + accent_color + ");"
-                "  color: " + wh + "; border: none; border-radius: 10px;"
-                "  padding: 12px 24px; font-size: 14px; font-weight: 600;"
-                "}"
-                "QPushButton:hover {"
-                "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-                "    stop:0 " + accent_color + ", stop:1 " + acc_light + ");"
-                "}"
-                "QPushButton:pressed { background: " + acc_dark + "; }"
-                "QPushButton:disabled { background:" + w4 + "; color:" + w6 + "; }"
-            )
-        else:
-            self.setStyleSheet(
-                "QPushButton {"
-                "  background: transparent; color: " + acc_light + ";"
-                "  border: 1px solid " + accent_color + "; border-radius: 10px;"
-                "  padding: 10px 20px; font-size: 13px; font-weight: 500;"
-                "}"
-                "QPushButton:hover { background: " + acc_glow + "; border-color: " + acc_light + "; }"
-                "QPushButton:pressed { background: " + acc_dark + "; }"
-            )
-        self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(42)
-
-
-class InputField(QLineEdit):
-    def __init__(self, placeholder="", parent=None):
-        super().__init__(parent)
-        self.setPlaceholderText(placeholder)
-        bg  = C["bg_input"]
-        txt = C["text_primary"]
-        brd = C["border"]
-        acc = C["success"]
-        w4  = C["white_40"]
-        self.setStyleSheet(
-            "QLineEdit {"
-            "  background-color: " + bg + "; color: " + txt + ";"
-            "  border: 1px solid " + brd + "; border-radius: 10px;"
-            "  padding: 10px 16px; font-size: 14px;"
-            "  selection-background-color: " + acc + ";"
-            "}"
-            "QLineEdit:focus { border-color: " + acc + "; background-color: #1E2A42; }"
-            "QLineEdit:hover { border-color: " + w4 + "; }"
+# ══════════════════════════════════════════════
+#  HELPERS UI
+# ══════════════════════════════════════════════
+def mk_btn(text, icon="", primary=True, color=None, tip=""):
+    b = QPushButton(f"  {icon}  {text}" if icon else text)
+    acc = color or C["success"]
+    dk = "#059669"; lt = "#34D399"; gl = "#064E3B"
+    if primary:
+        b.setStyleSheet(
+            f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {dk},stop:1 {acc});color:#fff;border:none;"
+            f"border-radius:9px;padding:10px 18px;font-size:13px;font-weight:600;}}"
+            f"QPushButton:hover{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {acc},stop:1 {lt});}}"
+            f"QPushButton:pressed{{background:{dk};}}"
+            f"QPushButton:disabled{{background:{C['white_40']};color:{C['white_60']};}}"
         )
-        self.setMinimumHeight(42)
-
-
-class OutputTerminal(QTextEdit):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setReadOnly(True)
-        txt = C["text_primary"]
-        brd = C["border"]
-        self.setStyleSheet(
-            "QTextEdit {"
-            "  background-color: #080C15; color: " + txt + ";"
-            "  border: 1px solid " + brd + "; border-radius: 12px;"
-            "  padding: 16px;"
-            "  font-family: 'Courier New', 'Consolas', monospace; font-size: 13px;"
-            "}"
+    else:
+        b.setStyleSheet(
+            f"QPushButton{{background:transparent;color:{lt};"
+            f"border:1px solid {acc};border-radius:9px;"
+            f"padding:8px 14px;font-size:12px;font-weight:500;}}"
+            f"QPushButton:hover{{background:{gl};border-color:{lt};}}"
+            f"QPushButton:pressed{{background:{dk};}}"
+            f"QPushButton:disabled{{border-color:{C['white_40']};color:{C['white_40']};}}"
         )
-        self.setMinimumHeight(280)
-        # Message bienvenue
-        col1 = C["success_light"]
-        col2 = C["white"]
-        col3 = C["text_secondary"]
-        self.setHtml(
-            "<span style='color:" + col1 + "; font-family:monospace;'>"
-            "┌─────────────────────────────────────────────┐<br>"
-            "│ <span style='color:" + col2 + "; font-weight:bold;'>"
-            "GESTION DES VULNÉRABILITÉS — Terminal</span> │<br>"
-            "│ <span style='color:" + col3 + ";'>"
-            "Prêt à scanner les vulnérabilités...</span>   │<br>"
-            "└─────────────────────────────────────────────┘"
-            "</span>"
-        )
+    if tip: b.setToolTip(tip)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setMinimumHeight(38)
+    return b
 
-    def append_html(self, html):
-        cursor = self.textCursor()
-        cursor.movePosition(cursor.End)
-        self.setTextCursor(cursor)
-        self.insertHtml(html)
-        cursor.movePosition(cursor.End)
-        self.setTextCursor(cursor)
-        self.ensureCursorVisible()
+def mk_combo(items, accent, parent=None):
+    c = QComboBox(parent)
+    c.addItems(items)
+    c.setStyleSheet(
+        f"QComboBox{{background:{C['bg_input']};color:{C['text_primary']};"
+        f"border:1px solid {C['border']};border-radius:8px;padding:7px 12px;font-size:12px;}}"
+        f"QComboBox:hover{{border-color:{accent};}}"
+        f"QComboBox QAbstractItemView{{background:{C['bg_card']};color:{C['text_primary']};"
+        f"border:1px solid {accent};selection-background-color:{accent};}}"
+    )
+    return c
 
-    def clear_output(self):
-        self.clear()
-        ts  = datetime.now().strftime("%H:%M:%S")
-        col = C["white_60"]
-        self.append_html(
-            "<span style='color:" + col + ";'>[" + ts + "] Terminal effacé.</span><br>"
-        )
+def mk_terminal(title="Terminal"):
+    t = QTextEdit()
+    t.setReadOnly(True)
+    t.setStyleSheet(
+        f"QTextEdit{{background:#060A12;color:{C['text_primary']};"
+        f"border:1px solid {C['border']};border-radius:10px;"
+        f"padding:14px;font-family:'Courier New',monospace;font-size:12px;}}"
+    )
+    t.setMinimumHeight(180)
+    c1=C["success_light"]; c2=C["white"]; c3=C["text_secondary"]
+    t.setHtml(
+        f"<span style='color:{c1};font-family:monospace;'>"
+        f"┌─────────────────────────────────┐<br>"
+        f"│ <b style='color:{c2};'>{title}</b><br>"
+        f"│ <span style='color:{c3};'>Prêt.</span><br>"
+        f"└─────────────────────────────────┘</span>")
+    return t
 
+def ahtml(term, html):
+    cur = term.textCursor(); cur.movePosition(cur.End)
+    term.setTextCursor(cur); term.insertHtml(html)
+    cur.movePosition(cur.End); term.setTextCursor(cur)
+    term.ensureCursorVisible()
 
-class SectionCard(QFrame):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._set_style(False)
+def mk_sep(color=None):
+    f = QFrame(); f.setFrameShape(QFrame.HLine)
+    f.setStyleSheet(f"background:{color or C['border']};border:none;max-height:1px;")
+    return f
 
-    def _set_style(self, highlighted):
-        brd = C["success"] if highlighted else C["border"]
-        bg  = C["bg_card"]
-        self.setStyleSheet(
-            "QFrame {"
-            "  background-color: " + bg + ";"
-            "  border: 1px solid " + brd + ";"
-            "  border-radius: 14px; padding: 4px;"
-            "}"
-        )
+def mk_label(text, color=None, size=13, bold=False):
+    l = QLabel(text)
+    s = f"color:{color or C['text_primary']};font-size:{size}px;"
+    if bold: s += "font-weight:700;"
+    l.setStyleSheet(s)
+    return l
 
-    def set_highlighted(self, on):
-        self._set_style(on)
+def mk_table(cols, min_h=150, stretch_col=None):
+    t = QTableWidget(0, len(cols))
+    t.setHorizontalHeaderLabels(cols)
+    if stretch_col is not None:
+        t.horizontalHeader().setSectionResizeMode(stretch_col, QHeaderView.Stretch)
+    t.setStyleSheet(
+        f"QTableWidget{{background:{C['bg_input']};color:{C['text_primary']};"
+        f"border:1px solid {C['border']};border-radius:8px;"
+        f"gridline-color:{C['border']};}}"
+        f"QHeaderView::section{{background:{C['bg_sidebar']};color:{C['white_80']};"
+        f"padding:5px;border:1px solid {C['border']};font-weight:600;font-size:12px;}}"
+        f"QTableWidget::item{{padding:4px;}}"
+    )
+    t.setMinimumHeight(min_h)
+    t.setEditTriggers(QTableWidget.NoEditTriggers)
+    return t
 
+def tbl_item(text, color=None, bold=False):
+    it = QTableWidgetItem(text)
+    it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+    if color: it.setForeground(QBrush(QColor(color)))
+    if bold:  it.setFont(QFont("Segoe UI", 9, QFont.Bold))
+    return it
 
-# ──────────────────────────────────────────────
-#  MODULE 2 — GESTION DES VULNÉRABILITÉS
-# ──────────────────────────────────────────────
-class VulnModule(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.title       = "Gestion de vulnérabilité"
-        self.subtitle    = "OpenVAS · Nikto · Analyse rapport · Plan de remédiation"
-        self.accent      = C["success"]
-        self.thread      = None
-        self._last_cmd   = ""
-        self._last_pdf   = ""
-        self._build_ui()
+# ══════════════════════════════════════════════
+#  ONGLET DE BASE
+# ══════════════════════════════════════════════
+class BaseStepTab(QWidget):
+    run_done = pyqtSignal(int, str)
 
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(18)
+    def __init__(self, step_idx, target_ref):
+        super().__init__()
+        self.step_idx   = step_idx
+        self.target_ref = target_ref
+        self.accent, self.dark = STEP_COLORS[5]
+        self.thread     = None
+        self.raw_output = ""
+        self._build()
 
-        # En-tête
-        header  = QWidget()
-        h_lay   = QHBoxLayout(header)
-        h_lay.setContentsMargins(0, 0, 0, 0)
-        t_block = QVBoxLayout()
-        t_block.setSpacing(4)
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 14, 20, 14)
+        lay.setSpacing(10)
 
-        t_lbl = QLabel(self.title)
-        t_lbl.setStyleSheet(
-            "font-size:22px; font-weight:700; color:" + C["white"] + "; letter-spacing:-0.3px;"
-        )
-        s_lbl = QLabel(self.subtitle)
-        s_lbl.setStyleSheet("font-size:13px; color:" + C["text_secondary"] + ";")
-        t_block.addWidget(t_lbl)
-        t_block.addWidget(s_lbl)
+        # En-tête coloré
+        hdr = QFrame()
+        hdr.setStyleSheet(
+            f"QFrame{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {self.dark},stop:1 {self.accent});"
+            f"border-radius:10px;border:none;}}")
+        hl = QHBoxLayout(hdr); hl.setContentsMargins(16,10,16,10)
 
-        badge = QLabel("● ACTIF")
-        badge.setStyleSheet(
-            "color:" + self.accent + "; font-size:11px; font-weight:700; letter-spacing:1px;"
-        )
-        h_lay.addLayout(t_block)
-        h_lay.addStretch()
-        h_lay.addWidget(badge, alignment=Qt.AlignTop)
-        layout.addWidget(header)
+        icon_l = QLabel(STEP_ICONS[self.step_idx])
+        icon_l.setStyleSheet("font-size:24px;background:transparent;")
+        name_l = QLabel(f"Étape {self.step_idx+1} — {STEP_NAMES[self.step_idx]}")
+        name_l.setStyleSheet("font-size:16px;font-weight:700;color:#fff;background:transparent;")
+        desc_l = QLabel(STEP_DESCS[self.step_idx])
+        desc_l.setStyleSheet("font-size:11px;color:rgba(255,255,255,0.75);background:transparent;")
+        desc_l.setWordWrap(True)
 
-        # Séparateur
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("background:" + C["border"] + "; border:none; max-height:1px;")
-        layout.addWidget(sep)
+        self.badge = QLabel("EN ATTENTE")
+        self.badge.setStyleSheet(
+            f"color:#fff;font-size:10px;font-weight:700;"
+            f"background:{self.dark};border:1px solid {self.accent};"
+            f"border-radius:6px;padding:3px 8px;letter-spacing:1px;")
 
-        # Card de configuration
-        self.config_card   = SectionCard()
-        self.config_layout = QVBoxLayout(self.config_card)
-        self.config_layout.setContentsMargins(20, 16, 20, 16)
-        self.config_layout.setSpacing(14)
+        tb = QVBoxLayout(); tb.setSpacing(2)
+        #tb.addWidget(name_l)
+        tb.addWidget(desc_l)
+        #hl.addWidget(icon_l); 
+        hl.addSpacing(8)
+        hl.addLayout(tb, stretch=1)
+        hl.addWidget(self.badge, alignment=Qt.AlignTop)
+        lay.addWidget(hdr)
+
+        # Config zone
+        self.cfg = QFrame()
+        self.cfg.setStyleSheet(
+            f"QFrame{{background:{C['bg_card']};"
+            f"border:1px solid {C['border']};border-radius:10px;}}")
+        self.cfg_lay = QVBoxLayout(self.cfg)
+        self.cfg_lay.setContentsMargins(14,12,14,12)
+        self.cfg_lay.setSpacing(8)
         self._build_config()
-        layout.addWidget(self.config_card)
+        lay.addWidget(self.cfg)
 
-        # Barre de progression
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedHeight(6)
-        self.progress_bar.setStyleSheet(
-            "QProgressBar { background:" + C["bg_input"] + "; border:none; border-radius:3px; }"
-            "QProgressBar::chunk {"
-            "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "    stop:0 " + C["success_dark"] + ", stop:1 " + C["success_light"] + ");"
-            "  border-radius:3px;"
-            "}"
-        )
-        layout.addWidget(self.progress_bar)
-
-        # Label terminal
-        tlbl = QLabel("  Terminal de sortie")
-        tlbl.setStyleSheet(
-            "font-size:12px; font-weight:600; color:" + C["white_60"] + ";"
-            " background:" + C["bg_card"] + "; padding:8px 16px;"
-            " border-radius:8px 8px 0 0;"
-            " border:1px solid " + C["border"] + "; border-bottom:none;"
-        )
-        layout.addWidget(tlbl)
+        # Progressbar
+        self.pbar = QProgressBar()
+        self.pbar.setValue(0); self.pbar.setTextVisible(False)
+        self.pbar.setFixedHeight(5)
+        self.pbar.setStyleSheet(
+            f"QProgressBar{{background:{C['bg_input']};border:none;border-radius:3px;}}"
+            f"QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {self.dark},stop:1 {self.accent});border-radius:3px;}}")
+        lay.addWidget(self.pbar)
 
         # Terminal
-        self.terminal = OutputTerminal()
-        layout.addWidget(self.terminal, stretch=1)
+        self.terminal = mk_terminal(f"Terminal — {STEP_NAMES[self.step_idx]}")
+        lay.addWidget(self.terminal, stretch=1)
 
         # Boutons
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
-        self.run_btn   = GlowButton("Lancer l'analyse", "▶", primary=True, accent_color=C["success"])
-        self.stop_btn  = GlowButton("Arrêter", "■", primary=False, accent_color=C["success"])
-        self.clear_btn = GlowButton("Effacer", "X", primary=False, accent_color=C["success"])
-        self.pdf_btn   = GlowButton("Ouvrir rapport PDF", "⬇", primary=False, accent_color=C["success"])
-
+        br = QHBoxLayout(); br.setSpacing(8)
+        self.run_btn  = mk_btn("Lancer",  "▶", primary=True,  color=self.accent)
+        self.stop_btn = mk_btn("Arrêter", "■", primary=False, color=self.accent)
+        self.clr_btn  = mk_btn("Effacer", "✕", primary=False, color=self.accent)
         self.stop_btn.setEnabled(False)
-        self.pdf_btn.setEnabled(False)
+        self.run_btn.clicked.connect(self._run)
+        self.stop_btn.clicked.connect(self._stop)
+        self.clr_btn.clicked.connect(lambda: self.terminal.clear())
+        br.addWidget(self.run_btn); br.addWidget(self.stop_btn)
+        br.addWidget(self.clr_btn)
+        self._extra_buttons(br)
+        br.addStretch()
+        self.info_lbl = QLabel("")
+        self.info_lbl.setStyleSheet(f"color:{C['white_60']};font-size:11px;")
+        br.addWidget(self.info_lbl)
+        lay.addLayout(br)
 
-        self.run_btn.clicked.connect(self.run_analysis)
-        self.stop_btn.clicked.connect(self.stop_analysis)
-        self.clear_btn.clicked.connect(self.terminal.clear_output)
-        self.pdf_btn.clicked.connect(self._open_pdf)
+    def _build_config(self): pass
+    def _extra_buttons(self, row): pass
+    def _get_command(self): return "echo 'non défini'"
 
-        btn_row.addWidget(self.run_btn)
-        btn_row.addWidget(self.stop_btn)
-        btn_row.addWidget(self.clear_btn)
-        btn_row.addWidget(self.pdf_btn)
-        btn_row.addStretch()
+    def _cfg_lbl(self, text):
+        l = QLabel(text)
+        l.setStyleSheet(f"color:{C['white_80']};font-weight:600;min-width:140px;font-size:12px;")
+        return l
 
-        self.status_lbl = QLabel("")
-        self.status_lbl.setStyleSheet("color:" + C["white_60"] + "; font-size:12px;")
-        btn_row.addWidget(self.status_lbl)
-        layout.addLayout(btn_row)
+    def _note(self, text):
+        l = QLabel(text)
+        l.setStyleSheet(f"color:{C['text_secondary']};font-size:11px;font-style:italic;")
+        l.setWordWrap(True)
+        return l
 
-    def _build_config(self):
-        row1 = QHBoxLayout()
-        row1.setSpacing(10)
-        row1.addWidget(self._config_label("Cible HTTP/IP :"))
-        self.target_input = InputField("ex: 192.168.1.10  ou  http://cible.local")
-        self.target_input.setText("192.168.1.10")
-        row1.addWidget(self.target_input)
-        self.config_layout.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(10)
-        row2.addWidget(self._config_label("Outil :"))
-        self.tool_combo = QComboBox()
-        self.tool_combo.addItems([
-            "Nikto  — Scanner Web vulnérabilités",
-            "OpenVAS  — Démarrer le service GVM",
-            "Nmap NSE  — Scripts vulnérabilités",
-            "WhatWeb  — Identification technologies",
-        ])
-        self.tool_combo.setStyleSheet(combo_style(C["success"]))
-        row2.addWidget(self.tool_combo)
-        self.config_layout.addLayout(row2)
-
-        self.config_layout.addWidget(
-            self._info_label("Requis :  sudo apt install nikto gvm whatweb")
-        )
-
-    def run_analysis(self):
-        target = self.target_input.text().strip()
+    def _run(self):
+        target = self.target_ref.text().strip()
         if not target:
-            self.status_lbl.setText("Entrez une cible.")
+            QMessageBox.warning(self,"Cible","Entrez une cible dans la barre du haut.")
             return
-        idx = self.tool_combo.currentIndex()
-        cmds = {
-            0: "nikto -h " + target,
-            1: "sudo gvm-start && echo 'OpenVAS démarré sur https://127.0.0.1:9392'",
-            2: "sudo nmap --script vuln,exploit -sV " + target,
-            3: "whatweb -v " + target,
-        }
-        self._start_thread(cmds.get(idx, "nikto -h " + target))
-
-    def stop_analysis(self):
-        if self.thread and self.thread.isRunning():
-            self.thread.stop()
-            self.thread.wait()
-            self._on_finished(False)
-            self.status_lbl.setText("Arrêté par l'utilisateur")
-
-    def _start_thread(self, command):
-        self._last_cmd = command
-        self.run_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.pdf_btn.setEnabled(False)
-        self.progress_bar.setValue(0)
-        self.status_lbl.setText("En cours...")
-        self.config_card.set_highlighted(True)
-
-        self.thread = CommandThread(command)
-        self.thread.output_signal.connect(self.terminal.append_html)
-        self.thread.finished_signal.connect(self._on_finished)
-        self.thread.progress_signal.connect(self.progress_bar.setValue)
+        if not is_valid_target(target):
+            QMessageBox.warning(self,"Cible invalide",
+                f"« {target} » n'est pas une IP ou URL valide.")
+            return
+        cmd = self._get_command()
+        self.raw_output = ""
+        self.run_btn.setEnabled(False); self.stop_btn.setEnabled(True)
+        self.pbar.setValue(0)
+        self.badge.setText("EN COURS")
+        self.badge.setStyleSheet(
+            f"color:#fff;font-size:10px;font-weight:700;"
+            f"background:{self.accent};border:1px solid {self.accent};"
+            f"border-radius:6px;padding:3px 8px;letter-spacing:1px;")
+        self.info_lbl.setText("En cours...")
+        self.cfg.setStyleSheet(
+            f"QFrame{{background:{C['bg_card']};"
+            f"border:1.5px solid {self.accent};border-radius:10px;}}")
+        self.thread = CommandThread(cmd)
+        self.thread.output_signal.connect(lambda h: ahtml(self.terminal, h))
+        self.thread.finished_signal.connect(self._on_done)
+        self.thread.progress_signal.connect(self.pbar.setValue)
         self.thread.start()
 
-    def _on_finished(self, success):
-        self.run_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.config_card.set_highlighted(False)
+    def _stop(self):
+        if self.thread and self.thread.isRunning():
+            self.thread.stop(); self.thread.wait()
+            self._on_done(False, self.thread.raw_output)
+            self.info_lbl.setText("Arrêté")
+
+    def _on_done(self, success, raw):
+        self.raw_output = raw
+        self.run_btn.setEnabled(True); self.stop_btn.setEnabled(False)
+        self.cfg.setStyleSheet(
+            f"QFrame{{background:{C['bg_card']};"
+            f"border:1px solid {C['border']};border-radius:10px;}}")
         ts = datetime.now().strftime("%H:%M:%S")
-
         if success:
-            self.status_lbl.setText("Terminé — " + ts)
-            self.terminal.append_html(
-                "<br><span style='color:" + C["success"] + "; font-weight:bold;'>"
-                "✔ Analyse terminée avec succès</span><br>"
-            )
+            self.badge.setText("✔ TERMINÉ")
+            self.badge.setStyleSheet(
+                "color:#fff;font-size:10px;font-weight:700;"
+                "background:#059669;border:1px solid #10B981;"
+                "border-radius:6px;padding:3px 8px;letter-spacing:1px;")
+            self.info_lbl.setText(f"✔ {ts}")
+            ahtml(self.terminal,
+                f"<br><span style='color:{C['success']};font-weight:bold;'>"
+                f"✔ Terminé — {ts}</span><br>")
         else:
-            self.status_lbl.setText("Terminé avec erreurs — " + ts)
+            self.badge.setText("⚠ ERREURS")
+            self.badge.setStyleSheet(
+                "color:#fff;font-size:10px;font-weight:700;"
+                "background:#7F1D1D;border:1px solid #EF4444;"
+                "border-radius:6px;padding:3px 8px;letter-spacing:1px;")
+            self.info_lbl.setText(f"⚠ {ts}")
+        self.run_done.emit(self.step_idx, raw)
 
-        # Génération automatique du PDF
-        raw = self.thread.raw_output if self.thread else ""
-        ts_file = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', self.title.lower())
-        pdf_dir = os.path.expanduser("~/CyberSec_Rapports")
-        os.makedirs(pdf_dir, exist_ok=True)
-        pdf_path = os.path.join(pdf_dir, f"rapport_{safe_name}_{ts_file}.pdf")
+# ══════════════════════════════════════════════
+#  ONGLET 1 — DÉCOUVRIR
+# ══════════════════════════════════════════════
+class TabDiscover(BaseStepTab):
+    def __init__(self, target_ref):
+        super().__init__(0, target_ref)
 
-        self.terminal.append_html(
-            "<br><span style='color:" + C["success_light"] + ";'>"
-            "⚙  Génération du rapport PDF en cours...</span><br>"
-        )
+    def _build_config(self):
+        row = QHBoxLayout(); row.setSpacing(8)
+        row.addWidget(self._cfg_lbl("Mode Nmap :"))
+        self.mode = mk_combo([
+            "Scan rapide        (-F)        ports courants",
+            "Scan standard      (-sV)       détection services",
+            "Scan complet       (-sV -O -A) OS + services",
+            "Scan SYN           (-sS -sV)   discret",
+            "Ping scan          (-sn)       hôtes actifs",
+        ], self.accent)
+        row.addWidget(self.mode)
+        self.cfg_lay.addLayout(row)
+        self.cfg_lay.addWidget(self._note("Requis : sudo apt install nmap"))
 
-        ok, result = generate_pdf_report(self.title, self._last_cmd, raw, pdf_path)
+    def _get_command(self):
+        t = self.target_ref.text().strip()
+        f = ["-F", "-sV", "-sV -O -A", "-sS -sV", "-sn"]
+        return f"sudo nmap {f[self.mode.currentIndex()]} {t}"
 
+# ══════════════════════════════════════════════
+#  ONGLET 2 — CLASSIFIER
+# ══════════════════════════════════════════════
+class TabClassify(BaseStepTab):
+    def __init__(self, target_ref):
+        super().__init__(1, target_ref)
+        self.classified = []
+
+    def _build_config(self):
+        self.cfg_lay.addWidget(self._note(
+            "Utilise les résultats de l'étape Découvrir pour classer les services "
+            "par criticité (HAUTE / MOYENNE / FAIBLE). Lance un scan rapide si "
+            "l'étape 1 n'a pas encore été exécutée."))
+        self.table = mk_table(["Port/Proto","Service","Bannière","Criticité"],
+                               min_h=150, stretch_col=2)
+        self.cfg_lay.addWidget(self.table)
+
+    def populate(self, raw_discover):
+        _, services, _ = parse_discover(raw_discover)
+        self.classified = parse_classify(raw_discover, services)
+        self.table.setRowCount(0)
+        for port, svc, banner, level, color in self.classified:
+            r = self.table.rowCount(); self.table.insertRow(r)
+            self.table.setItem(r, 0, tbl_item(port))
+            self.table.setItem(r, 1, tbl_item(svc))
+            self.table.setItem(r, 2, tbl_item(banner))
+            self.table.setItem(r, 3, tbl_item(level, color=color, bold=True))
+        ahtml(self.terminal,
+            f"<span style='color:{C['success']};'>✔ {len(self.classified)} "
+            f"service(s) classifié(s)</span><br>")
+
+    def _get_command(self):
+        return f"sudo nmap -sV -F {self.target_ref.text().strip()}"
+
+    def _on_done(self, success, raw):
+        if not self.classified:
+            self.populate(raw)
+        super()._on_done(success, raw)
+
+# ══════════════════════════════════════════════
+#  ONGLET 3 — ÉVALUER
+# ══════════════════════════════════════════════
+class TabEvaluate(BaseStepTab):
+    def __init__(self, target_ref):
+        super().__init__(2, target_ref)
+        self.vulns = []
+
+    def _build_config(self):
+        row = QHBoxLayout(); row.setSpacing(8)
+        row.addWidget(self._cfg_lbl("Outil :"))
+        self.tool = mk_combo([
+            "Nikto            — Scanner web (XSS, injections, configs)",
+            "Nmap NSE vuln    — Scripts vulnérabilités réseau",
+            "Nmap NSE exploit — Scripts d'exploitation",
+            "WhatWeb          — Empreinte & versions technologies",
+        ], self.accent)
+        row.addWidget(self.tool)
+        self.cfg_lay.addLayout(row)
+        self.cfg_lay.addWidget(self._note(
+            "Requis : sudo apt install nikto nmap whatweb"))
+
+    def _get_command(self):
+        t = self.target_ref.text().strip()
+        return [
+            f"nikto -h {t}",
+            f"sudo nmap --script vuln -sV {t}",
+            f"sudo nmap --script exploit -sV {t}",
+            f"whatweb -v {t}",
+        ][self.tool.currentIndex()]
+
+    def _on_done(self, success, raw):
+        self.vulns = parse_evaluate(raw)
+        ahtml(self.terminal,
+            f"<span style='color:{C['success']};'>✔ {len(self.vulns)} "
+            f"vulnérabilité(s) détectée(s)</span><br>")
+        super()._on_done(success, raw)
+
+# ══════════════════════════════════════════════
+#  ONGLET 4 — RAPPORTER
+# ══════════════════════════════════════════════
+class TabReport(BaseStepTab):
+    def __init__(self, target_ref, step_results_ref):
+        self._sr = step_results_ref
+        super().__init__(3, target_ref)
+        self._last_pdf = ""
+
+    def _build_config(self):
+        self.cfg_lay.addWidget(self._note(
+            "Génère le rapport PDF complet structuré en 6 sections — "
+            "une section par étape du cycle — avec les résultats réels "
+            "obtenus sur la cible. Exécutez les étapes 1–3 d'abord."))
+
+    def _extra_buttons(self, row):
+        self.pdf_btn = mk_btn("Ouvrir PDF","📄",primary=False,color=self.accent)
+        self.pdf_btn.setEnabled(False)
+        self.pdf_btn.clicked.connect(self._open_pdf)
+        row.addWidget(self.pdf_btn)
+
+        self.save_btn = mk_btn("Enregistrer log","💾",primary=False,color=self.accent)
+        self.save_btn.setEnabled(False)
+        self.save_btn.clicked.connect(self._save_log)
+        row.addWidget(self.save_btn)
+
+    def _get_command(self):
+        return f"echo 'Génération du rapport pour {self.target_ref.text().strip()}'"
+
+    def _on_done(self, success, raw):
+        target = self.target_ref.text().strip()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        outdir = os.path.expanduser("~/CyberSec_Rapports")
+        os.makedirs(outdir, exist_ok=True)
+        safe = re.sub(r'[^a-zA-Z0-9_]','_',target)
+        path = os.path.join(outdir, f"rapport_cycle_{safe}_{ts}.pdf")
+
+        ahtml(self.terminal,
+            f"<span style='color:{C['success_light']};'>⚙ Génération PDF...</span><br>")
+
+        # S'assurer que les données corriger sont incluses
+        if 4 not in self._sr and hasattr(self, '_remediate_ref'):
+            actions = self._remediate_ref.actions
+            self._sr[4] = {'raw': 'Plan généré automatiquement.',
+                           'data': {'actions': actions}}
+
+        ok, result = generate_pdf_report(target, self._sr, path)
         if ok:
             self._last_pdf = result
             self.pdf_btn.setEnabled(True)
-            self.terminal.append_html(
-                "<span style='color:" + C["success"] + "; font-weight:bold;'>"
-                "📄 Rapport PDF généré : " + result + "</span><br>"
-            )
-            self.status_lbl.setText("PDF prêt — " + ts)
+            self.save_btn.setEnabled(True)
+            ahtml(self.terminal,
+                f"<span style='color:{C['success']};font-weight:bold;'>"
+                f"📄 PDF généré : {result}</span><br>")
         else:
-            self.terminal.append_html(
-                "<span style='color:" + C["warning"] + ";'>"
-                "⚠ PDF non généré (reportlab manquant ?) : " + result + "<br>"
-                "→ Installez : pip install reportlab --break-system-packages"
-                "</span><br>"
-            )
+            ahtml(self.terminal,
+                f"<span style='color:{C['warning']};'>⚠ Erreur :<br>{result[:300]}</span><br>")
+        super()._on_done(success, raw)
 
     def _open_pdf(self):
-        """Ouvre le dernier rapport PDF avec le visionneur système."""
         if self._last_pdf and os.path.exists(self._last_pdf):
-            for viewer in ["xdg-open", "evince", "okular", "eog"]:
+            for v in ["evince","okular","atril","xdg-open"]:
                 try:
-                    subprocess.Popen([viewer, self._last_pdf],
+                    subprocess.Popen([v,self._last_pdf],
                                      stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL)
-                    self.terminal.append_html(
-                        "<span style='color:" + C["success_light"] + ";'>"
-                        "📂 Ouverture : " + self._last_pdf + "</span><br>"
-                    )
                     return
                 except FileNotFoundError:
                     continue
-            self.terminal.append_html(
-                "<span style='color:" + C["warning"] + ";'>"
-                "Rapport disponible ici : " + self._last_pdf + "</span><br>"
-            )
+            QMessageBox.information(self,"PDF",f"Rapport : {self._last_pdf}")
 
-    def _config_label(self, text):
-        lbl = QLabel(text)
-        lbl.setStyleSheet(
-            "color:" + C["white_80"] + "; font-weight:600; min-width:140px;"
-        )
-        return lbl
+    def _save_log(self):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(
+            self,"Enregistrer log",
+            os.path.expanduser(f"~/CyberSec_Rapports/log_{ts}.txt"),
+            "Fichiers texte (*.txt)")
+        if path:
+            all_raw = "\n\n".join(
+                f"=== {STEP_NAMES[i]} ===\n{self._sr.get(i,{}).get('raw','')}"
+                for i in range(6))
+            try:
+                with open(path,'w',encoding='utf-8') as f:
+                    f.write(f"CyberSec Tool — Log cycle complet\n"
+                            f"Cible : {self.target_ref.text().strip()}\n"
+                            f"Date  : {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n"
+                            f"{'='*60}\n\n{all_raw}")
+                ahtml(self.terminal,
+                    f"<span style='color:{C['success']};'>💾 Log : {path}</span><br>")
+            except Exception as e:
+                ahtml(self.terminal,
+                    f"<span style='color:{C['danger']};'>✖ {e}</span><br>")
 
-    def _info_label(self, text):
-        lbl = QLabel(text)
-        lbl.setStyleSheet(
-            "color:" + C["text_secondary"] + "; font-size:12px; font-style:italic;"
-        )
-        return lbl
+# ══════════════════════════════════════════════
+#  ONGLET 5 — CORRIGER
+# ══════════════════════════════════════════════
+class TabRemediate(BaseStepTab):
+    def __init__(self, target_ref):
+        super().__init__(4, target_ref)
+        self.actions = []
 
+    def _build_config(self):
+        self.cfg_lay.addWidget(self._note(
+            "Plan de remédiation basé sur les vulnérabilités de l'étape 3 (Évaluer). "
+            "Les actions correctives sont générées automatiquement et classées par priorité."))
+        self.table = mk_table(["Priorité","Référence","Action corrective"],
+                               min_h=180, stretch_col=2)
+        self.cfg_lay.addWidget(self.table)
 
-# ──────────────────────────────────────────────
+    def populate(self, vulns, classified):
+        self.actions = parse_remediation(vulns, classified)
+        self.table.setRowCount(0)
+        for score, color, ref, action in self.actions:
+            r = self.table.rowCount(); self.table.insertRow(r)
+            self.table.setItem(r, 0, tbl_item(score, color=color, bold=True))
+            self.table.setItem(r, 1, tbl_item(ref))
+            self.table.setItem(r, 2, tbl_item(action))
+        ahtml(self.terminal,
+            f"<span style='color:{C['success']};'>✔ {len(self.actions)} "
+            f"action(s) corrective(s)</span><br>")
+
+    def _get_command(self):
+        return f"echo 'Plan de remédiation — {self.target_ref.text().strip()}'"
+
+    def _on_done(self, success, raw):
+        if not self.actions:
+            ahtml(self.terminal,
+                f"<span style='color:{C['warning']};'>"
+                f"⚠ Exécutez l'étape 3 (Évaluer) d'abord.</span><br>")
+        super()._on_done(success, raw)
+
+# ══════════════════════════════════════════════
+#  ONGLET 6 — VÉRIFIER
+# ══════════════════════════════════════════════
+class TabVerify(BaseStepTab):
+    def __init__(self, target_ref):
+        super().__init__(5, target_ref)
+        self.ports_before = []
+        self.vulns_before = []
+
+    def _build_config(self):
+        row = QHBoxLayout(); row.setSpacing(8)
+        row.addWidget(self._cfg_lbl("Outil :"))
+        self.tool = mk_combo([
+            "Nmap -sV         — Rescanner les services",
+            "Nikto            — Rescanner les vulnérabilités web",
+            "Nmap NSE vuln    — Rescanner les scripts vuln",
+        ], self.accent)
+        row.addWidget(self.tool)
+        self.cfg_lay.addLayout(row)
+        self.compare_lbl = QLabel("En attente des résultats des étapes 1 et 3...")
+        self.compare_lbl.setStyleSheet(
+            f"color:{C['text_secondary']};font-size:12px;")
+        self.cfg_lay.addWidget(self.compare_lbl)
+
+    def set_baselines(self, ports, vulns):
+        self.ports_before = ports
+        self.vulns_before = vulns
+        self.compare_lbl.setText(
+            f"Référence avant correctifs : {len(ports)} port(s) — "
+            f"{len(vulns)} vulnérabilité(s).")
+
+    def _get_command(self):
+        t = self.target_ref.text().strip()
+        return [f"sudo nmap -sV -F {t}",
+                f"nikto -h {t}",
+                f"sudo nmap --script vuln -sV {t}"][self.tool.currentIndex()]
+
+    def _on_done(self, success, raw):
+        pa = len(parse_discover(raw)[0])
+        va = len(parse_evaluate(raw))
+        pb = len(self.ports_before); vb = len(self.vulns_before)
+        dp = pb - pa; dv = vb - va
+        ps_str = f"✔ -{dp}" if dp > 0 else (f"= 0" if dp == 0 else f"✗ +{-dp}")
+        vs_str = f"✔ -{dv}" if dv > 0 else (f"= 0" if dv == 0 else f"✗ +{-dv}")
+        self.compare_lbl.setText(
+            f"Ports : {pb} → {pa} ({ps_str})   |   "
+            f"Vulnérabilités : {vb} → {va} ({vs_str})")
+        if dv > 0 or dp > 0:
+            msg = f"✔ Corrections efficaces : {dv} vuln(s) et {dp} port(s) éliminé(s)."
+            c   = C["success"]
+        elif dv == 0 and dp == 0 and (pb or vb):
+            msg = "⚠ Aucune réduction — vérifiez l'application des correctifs."
+            c   = C["warning"]
+        else:
+            msg = "ℹ Aucune référence — exécutez d'abord les étapes 1 et 3."
+            c   = C["info"]
+        ahtml(self.terminal,
+            f"<br><span style='color:{c};font-weight:bold;'>{msg}</span><br>")
+        super()._on_done(success, raw)
+
+# ══════════════════════════════════════════════
 #  FENÊTRE PRINCIPALE
-# ──────────────────────────────────────────────
+# ══════════════════════════════════════════════
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CyberSec Tool — Sujet 2: Gestion des Vulnérabilités")
-        self.setMinimumSize(1000, 680)
-        self.resize(1280, 800)
-        self.setStyleSheet(make_global_style())
+        self.setWindowTitle("CyberSec Tool — Sujet 2 : Gestion des Vulnérabilités")
+        self.setMinimumSize(1080, 700)
+        self.resize(1340, 850)
+        self.setStyleSheet(
+            f"QMainWindow,QWidget{{background:{C['bg_main']};"
+            f"color:{C['text_primary']};"
+            f"font-family:'Segoe UI','Helvetica Neue',Arial,sans-serif;font-size:13px;}}"
+            f"QScrollBar:vertical{{background:{C['bg_card']};width:6px;border-radius:3px;}}"
+            f"QScrollBar::handle:vertical{{background:{C['success']};border-radius:3px;min-height:30px;}}"
+            f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}"
+            f"QScrollBar:horizontal{{background:{C['bg_card']};height:6px;border-radius:3px;}}"
+            f"QScrollBar::handle:horizontal{{background:{C['success']};border-radius:3px;}}"
+            f"QToolTip{{background:{C['bg_card']};color:{C['white']};"
+            f"border:1px solid {C['success']};border-radius:6px;padding:5px 9px;}}"
+        )
+        self.step_results = {}
         self._build_ui()
         self._center()
 
     def _center(self):
-        screen = QApplication.primaryScreen().geometry()
-        g = self.geometry()
-        self.move(
-            (screen.width()  - g.width())  // 2,
-            (screen.height() - g.height()) // 2,
-        )
+        g = self.geometry(); s = QApplication.primaryScreen().geometry()
+        self.move((s.width()-g.width())//2, (s.height()-g.height())//2)
 
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0,0,0,0); root.setSpacing(0)
 
-        # Sidebar
-        sidebar = self._build_sidebar()
-        root.addWidget(sidebar)
+        # ── Barre du haut ─────────────────────────────────────────────────────
+        topbar = QFrame()
+        topbar.setFixedHeight(62)
+        topbar.setStyleSheet(
+            f"QFrame{{background:{C['bg_sidebar']};"
+            f"border-bottom:1px solid {C['border']};}}")
+        tl = QHBoxLayout(topbar)
+        tl.setContentsMargins(18,0,18,0); tl.setSpacing(12)
 
-        # Module principal
-        scroll = QScrollArea()
-        self.vuln_module = VulnModule()
-        scroll.setWidget(self.vuln_module)
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(
-            "QScrollArea { background:" + C["bg_main"] + "; border:none; }"
-        )
-        root.addWidget(scroll, stretch=1)
+        logo = QLabel("🛡️  CyberSec Tool")
+        logo.setStyleSheet(f"font-size:16px;font-weight:800;color:{C['white']};")
+        tl.addWidget(logo)
+
+        vsep = QFrame(); vsep.setFrameShape(QFrame.VLine)
+        vsep.setStyleSheet(f"background:{C['border']};border:none;max-width:1px;margin:14px 0;")
+        tl.addWidget(vsep)
+
+        tl.addWidget(mk_label("🎯 Cible :", C["white_60"], 12, bold=True))
+
+        self.target_input = QLineEdit()
+        self.target_input.setPlaceholderText("192.168.1.10  ou  http://cible.local")
+        self.target_input.setText("192.168.1.10")
+        self.target_input.setMinimumWidth(280)
+        self.target_input.setStyleSheet(
+            f"QLineEdit{{background:{C['bg_input']};color:{C['text_primary']};"
+            f"border:1px solid {C['border']};border-radius:8px;"
+            f"padding:7px 13px;font-size:13px;font-weight:600;}}"
+            f"QLineEdit:focus{{border-color:{C['success']};background:#1E2A42;}}")
+        tl.addWidget(self.target_input)
+
+        self.valid_lbl = QLabel("● ...")
+        self.valid_lbl.setStyleSheet(f"color:{C['white_60']};font-size:11px;font-weight:600;")
+        self.target_input.textChanged.connect(self._update_valid)
+        tl.addWidget(self.valid_lbl)
+        tl.addStretch()
+
+        # Pastilles indicateur cycle
+        self.pills = []
+        for i, (icon, name) in enumerate(zip(STEP_ICONS, STEP_NAMES)):
+            acc, dark = STEP_COLORS[5]
+            p = QPushButton(f"{name}")
+            p.setStyleSheet(
+                f"QPushButton{{background:{dark};color:{acc};"
+                f"border:1px solid {acc};border-radius:11px;"
+                f"padding:3px 9px;font-size:10px;font-weight:600;}}"
+                f"QPushButton:hover{{background:{acc};color:#fff;}}")
+            p.setFixedHeight(24); p.setCursor(Qt.PointingHandCursor)
+            p.clicked.connect(lambda _, idx=i: self.tabs.setCurrentIndex(idx))
+            self.pills.append(p); tl.addWidget(p)
+
+        root.addWidget(topbar)
+
+        # ── Corps : sidebar + onglets ─────────────────────────────────────────
+        body = QWidget()
+        bl = QHBoxLayout(body); bl.setContentsMargins(0,0,0,0); bl.setSpacing(0)
+        bl.addWidget(self._build_sidebar())
+
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(
+            f"QTabWidget::pane{{border:none;background:{C['bg_main']};}}"
+            f"QTabBar::tab{{background:{C['bg_card']};color:{C['white_60']};"
+            f"padding:9px 16px;border:none;font-size:12px;font-weight:600;"
+            f"border-bottom:3px solid transparent;margin-right:2px;}}"
+            f"QTabBar::tab:selected{{color:{C['white']};"
+            f"border-bottom:3px solid {C['success']};}}"
+            f"QTabBar::tab:hover{{color:{C['white']};background:{C['bg_sidebar']};}}")
+
+        # Instancier les 6 onglets
+        self.t_disc = TabDiscover(self.target_input)
+        self.t_clas = TabClassify(self.target_input)
+        self.t_eval = TabEvaluate(self.target_input)
+        self.t_repo = TabReport(self.target_input, self.step_results)
+        self.t_reme = TabRemediate(self.target_input)
+        self.t_veri = TabVerify(self.target_input)
+
+        # Référence croisée pour que Rapporter puisse accéder aux actions Corriger
+        self.t_repo._remediate_ref = self.t_reme
+
+        for widget, name in [
+            (self.t_disc, "Découvrir"),
+            (self.t_clas, "Classifier"),
+            (self.t_eval, "Évaluer"),
+            (self.t_repo, "Rapporter"),
+            (self.t_reme, "Corriger"),
+            (self.t_veri, "Vérifier"),
+        ]:
+            sc = QScrollArea(); sc.setWidget(widget); sc.setWidgetResizable(True)
+            sc.setStyleSheet(f"QScrollArea{{background:{C['bg_main']};border:none;}}")
+            self.tabs.addTab(sc, name)
+
+        # Connexions de propagation entre étapes
+        self.t_disc.run_done.connect(self._after_discover)
+        self.t_clas.run_done.connect(self._after_classify)
+        self.t_eval.run_done.connect(self._after_evaluate)
+        self.t_repo.run_done.connect(self._after_generic)
+        self.t_reme.run_done.connect(self._after_remediate)
+        self.t_veri.run_done.connect(self._after_verify)
+
+        bl.addWidget(self.tabs, stretch=1)
+        root.addWidget(body, stretch=1)
 
     def _build_sidebar(self):
-        sidebar = QFrame()
-        sidebar.setFixedWidth(260)
-        sidebar.setStyleSheet(
-            "QFrame {"
-            "  background-color:" + C["bg_sidebar"] + ";"
-            "  border-right:1px solid " + C["border"] + ";"
-            "}"
-        )
-        lay = QVBoxLayout(sidebar)
-        lay.setContentsMargins(16, 20, 16, 20)
-        lay.setSpacing(6)
+        sb = QFrame(); sb.setFixedWidth(195)
+        sb.setStyleSheet(
+            f"QFrame{{background:{C['bg_sidebar']};"
+            f"border-right:1px solid {C['border']};}}")
+        lay = QVBoxLayout(sb)
+        lay.setContentsMargins(10,14,10,14); lay.setSpacing(4)
+        lay.addWidget(mk_label("Cycle complet", C["white_80"], 12, bold=True))
+        lay.addWidget(mk_sep()); lay.addSpacing(4)
 
-        # Logo
-        logo = QFrame()
-        logo.setStyleSheet(
-            "QFrame {"
-            "  background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-            "    stop:0 " + C["success_dark"] + ", stop:1 " + C["success_glow"] + ");"
-            "  border-radius:12px; border:none;"
-            "}"
-        )
-        llay = QVBoxLayout(logo)
-        llay.setContentsMargins(16, 14, 16, 14)
-        llay.setSpacing(2)
-
-        icon_l = QLabel("🛡️")
-        icon_l.setStyleSheet("font-size:24px; font-weight:900; color:" + C["white"] + "; background:transparent;")
-        title_l = QLabel("Vulnérabilités")
-        title_l.setStyleSheet(
-            "font-size:16px; font-weight:800; color:" + C["white"] + ";"
-            " letter-spacing:-0.3px; background:transparent;"
-        )
-        sub_l = QLabel("Sujet 2 — FAFA12")
-        sub_l.setStyleSheet(
-            "font-size:11px; color:" + C["white_80"] + "; background:transparent;"
-        )
-        llay.addWidget(icon_l)
-        llay.addWidget(title_l)
-        llay.addWidget(sub_l)
-        lay.addWidget(logo)
-
-        # Description du module
-        lay.addSpacing(20)
-        desc = QLabel(
-            "Ce module permet de détecter et gérer les vulnérabilités "
-            "de sécurité sur les systèmes et applications web."
-        )
-        desc.setWordWrap(True)
-        desc.setStyleSheet(
-            "color:" + C["text_secondary"] + "; font-size:12px; line-height:1.4;"
-        )
-        lay.addWidget(desc)
+        self.sb_btns = []
+        for i, (icon, name) in enumerate(zip(STEP_ICONS, STEP_NAMES)):
+            #acc, dark = STEP_COLORS[i]
+            acc, dark = STEP_COLORS[6]
+            b = QPushButton(f" {name}")
+            b.setStyleSheet(
+                f"QPushButton{{background:{dark};color:{acc};"
+                f"border:1px solid {acc};border-radius:8px;"
+                f"padding:8px 10px;font-size:12px;font-weight:600;"
+                f"text-align:center;}}"
+                f"QPushButton:hover{{background:#8899CC;color:#00F;}}")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _, idx=i: self.tabs.setCurrentIndex(idx))
+            self.sb_btns.append(b); lay.addWidget(b)
 
         lay.addStretch()
+        lay.addWidget(mk_sep()); lay.addSpacing(4)
+        lay.addWidget(mk_label("Avancement", C["white_60"], 10, bold=True))
+        self.gpbar = QProgressBar()
+        self.gpbar.setValue(0); self.gpbar.setFixedHeight(16)
+        self.gpbar.setFormat("%p% terminé"); self.gpbar.setTextVisible(True)
+        self.gpbar.setStyleSheet(
+            f"QProgressBar{{background:{C['bg_input']};border:none;"
+            f"border-radius:8px;color:{C['white']};font-size:10px;font-weight:600;}}"
+            f"QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 #059669,stop:1 #34D399);border-radius:8px;}}")
+        lay.addWidget(self.gpbar)
+        lay.addSpacing(6)
+        lay.addWidget(mk_label("v2.0  PyQt5  Python 3",C["white_40"],10))
+        return sb
 
-        # Séparateur
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("background:" + C["border"] + "; border:none; max-height:1px;")
-        lay.addWidget(sep)
-        lay.addSpacing(8)
+    def _update_valid(self, text):
+        ok = is_valid_target(text.strip())
+        self.valid_lbl.setText("● Valide" if ok else "● Invalide")
+        self.valid_lbl.setStyleSheet(
+            f"color:{C['success'] if ok else C['danger']};"
+            f"font-size:11px;font-weight:600;")
 
-        # Outils
-        info = QLabel("Outils intégrés :")
-        info.setStyleSheet("color:" + C["white_60"] + "; font-size:11px; font-weight:600;")
-        lay.addWidget(info)
+    def _update_progress(self):
+        done = sum(1 for v in self.step_results.values() if v.get('raw','').strip())
+        self.gpbar.setValue(int(done/6*100))
+        for i, pill in enumerate(self.pills):
+            acc, dark = STEP_COLORS[i]
+            finished = bool(self.step_results.get(i,{}).get('raw','').strip())
+            if finished:
+                pill.setStyleSheet(
+                    f"QPushButton{{background:{acc};color:#fff;"
+                    f"border:1px solid {acc};border-radius:11px;"
+                    f"padding:3px 9px;font-size:10px;font-weight:700;}}"
+                    f"QPushButton:hover{{background:{acc};color:#fff;}}")
+            else:
+                pill.setStyleSheet(
+                    f"QPushButton{{background:{dark};color:{acc};"
+                    f"border:1px solid {acc};border-radius:11px;"
+                    f"padding:3px 9px;font-size:10px;font-weight:600;}}"
+                    f"QPushButton:hover{{background:{acc};color:#fff;}}")
 
-        for tool, desc_text in [
-            ("nikto", "Scanner Web"),
-            ("openvas/gvm", "Vulnérabilités"),
-            ("nmap NSE", "Scripts avancés"),
-            ("whatweb", "Fingerprinting"),
-        ]:
-            row = QHBoxLayout()
-            d = QLabel("-")
-            d.setStyleSheet("color:" + C["success_light"] + "; font-size:13px; min-width:12px;")
-            t = QLabel(tool)
-            t.setStyleSheet("color:" + C["text_primary"] + "; font-size:12px; font-family:monospace;")
-            ds = QLabel(desc_text)
-            ds.setStyleSheet("color:" + C["text_secondary"] + "; font-size:11px;")
-            row.addWidget(d)
-            row.addWidget(t)
-            row.addWidget(ds)
-            row.addStretch()
-            lay.addLayout(row)
+    # ── Propagation ──────────────────────────────────────────────────────────
+    def _after_discover(self, idx, raw):
+        ports, services, os_info = parse_discover(raw)
+        self.step_results[0] = {
+            'raw': raw,
+            'data': {'ports': ports, 'services': services, 'os': os_info}
+        }
+        self.t_clas.populate(raw)
+        self._update_progress()
 
-        lay.addSpacing(10)
-        ver = QLabel("v1.0  PyQt5  Python 3")
-        ver.setStyleSheet("color:" + C["white_40"] + "; font-size:10px;")
-        lay.addWidget(ver, alignment=Qt.AlignHCenter)
-        return sidebar
+    def _after_classify(self, idx, raw):
+        self.step_results[1] = {
+            'raw': raw,
+            'data': {'classified': self.t_clas.classified}
+        }
+        self._update_progress()
 
+    def _after_evaluate(self, idx, raw):
+        vulns = parse_evaluate(raw)
+        self.step_results[2] = {'raw': raw, 'data': {'vulns': vulns}}
+        classified = self.step_results.get(1,{}).get('data',{}).get('classified',[])
+        self.t_reme.populate(vulns, classified)
+        ports = self.step_results.get(0,{}).get('data',{}).get('ports',[])
+        self.t_veri.set_baselines(ports, vulns)
+        self._update_progress()
 
-# ──────────────────────────────────────────────
+    def _after_generic(self, idx, raw):
+        self.step_results.setdefault(idx, {})['raw'] = raw
+        self._update_progress()
+
+    def _after_remediate(self, idx, raw):
+        self.step_results[4] = {
+            'raw': raw,
+            'data': {'actions': self.t_reme.actions}
+        }
+        self._update_progress()
+
+    def _after_verify(self, idx, raw):
+        ports_after = parse_discover(raw)[0]
+        vulns_after = parse_evaluate(raw)
+        self.step_results[5] = {
+            'raw': raw,
+            'data': {'ports': ports_after, 'vulns': vulns_after}
+        }
+        self._update_progress()
+
+# ══════════════════════════════════════════════
 #  POINT D'ENTRÉE
-# ──────────────────────────────────────────────
+# ══════════════════════════════════════════════
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("CyberSec Tool - Sujet 2")
     app.setFont(QFont("Segoe UI", 10))
-
     pal = QPalette()
     pal.setColor(QPalette.Window,          QColor(C["bg_main"]))
     pal.setColor(QPalette.WindowText,      QColor(C["text_primary"]))
@@ -975,11 +1505,9 @@ def main():
     pal.setColor(QPalette.Highlight,       QColor(C["success"]))
     pal.setColor(QPalette.HighlightedText, QColor(C["white"]))
     app.setPalette(pal)
-
     win = MainWindow()
     win.show()
     sys.exit(app.exec_())
-
 
 if __name__ == "__main__":
     main()
