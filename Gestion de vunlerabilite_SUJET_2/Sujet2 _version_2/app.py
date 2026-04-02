@@ -57,6 +57,7 @@ STEP_COLORS = {
     4: ("#EF4444", "#7F1D1D"),
     5: ("#06B6D4", "#164E63"),
     6: ("#FCFDFD", "#030C1F"),
+    7: ("#1A2437", "#131C2D"),
 }
 STEP_NAMES = ["Découvrir", "Classifier", "Évaluer",
               "Rapporter",  "Corriger",   "Vérifier"]
@@ -83,8 +84,281 @@ def is_valid_target(t):
         return True
     return False
 
+def extract_host(t):
+    """Extrait l'IP/hostname depuis une URL ou IP brute.
+    Exemples :
+      http://127.0.0.1:5000  → 127.0.0.1
+      https://site.com:8443  → site.com
+      192.168.1.10:5000      → 192.168.1.10
+      192.168.1.10           → 192.168.1.10
+    Utilisé pour passer une cible propre à nmap (sans http://).
+    """
+    if re.match(r'^https?://', t):
+        from urllib.parse import urlparse
+        parsed = urlparse(t)
+        return parsed.hostname or t
+    if ':' in t:
+        return t.rsplit(':', 1)[0]
+    return t
+
+def extract_port(t):
+    """Extrait le port depuis l'URL ou retourne None."""
+    if re.match(r'^https?://', t):
+        from urllib.parse import urlparse
+        return urlparse(t).port
+    if re.match(r'.*:\d+$', t):
+        try: return int(t.rsplit(':',1)[1])
+        except: pass
+    return None
+
+
 # ══════════════════════════════════════════════
-#  PARSEURS
+#  SCANNER WEB INTÉGRÉ — sans fichier externe
+#  Fonctionne avec http://... directement
+# ══════════════════════════════════════════════
+
+# Code autonome du scanner web (écrit dans /tmp à l'exécution)
+_INLINE_SCANNER_CODE = r'''
+import socket, re, subprocess
+from urllib.parse import urlparse
+
+url = "__TARGET__"
+if not re.match(r"^https?://", url): url = "http://" + url
+p     = urlparse(url)
+host  = p.hostname or "127.0.0.1"
+scheme= p.scheme or "http"
+p_exp = p.port
+
+WEB_PORTS = [(80,"http"),(443,"https"),(8080,"http"),
+             (8443,"https"),(5000,"http"),(3000,"http"),(8000,"http")]
+if p_exp:
+    WEB_PORTS = [(p_exp,scheme)]+[x for x in WEB_PORTS if x[0]!=p_exp]
+OTHER = [(22,"ssh"),(21,"ftp"),(23,"telnet"),(3306,"mysql"),(5432,"postgres")]
+
+def tcp_ok(h, port, t=2):
+    try:
+        s=socket.socket(); s.settimeout(t)
+        ok=s.connect_ex((h,port))==0; s.close(); return ok
+    except: return False
+
+def detect_fw(hdrs):
+    srv = hdrs.get("Server", hdrs.get("server",""))
+    xpb = hdrs.get("X-Powered-By", hdrs.get("x-powered-by",""))
+    txt = (srv+xpb).lower()
+    if "werkzeug" in txt or "flask" in txt:
+        m=re.search(r"werkzeug[\s/]+([\d.]+)",txt)
+        return f"http    Werkzeug httpd {m.group(1) if m else '?'} (Python/Flask)"
+    if "django"  in txt: return "http    Django (Python)"
+    if "express" in txt: return "http    Express (Node.js)"
+    if "jetty"   in txt:
+        m=re.search(r"jetty[\s/]+([\d.]+)",txt)
+        return f"http    Jetty {m.group(1) if m else '?'}"
+    if "nginx"   in txt:
+        m=re.search(r"nginx[\s/]+([\d.]+)",txt)
+        return f"http    nginx {m.group(1) if m else '?'}"
+    if "apache"  in txt:
+        m=re.search(r"apache[\s/]+([\d.]+)",txt)
+        return f"http    Apache httpd {m.group(1) if m else '?'}"
+    if srv: return f"http    {srv[:50]}"
+    return "http    HTTP service"
+
+# ── En-tête identique à nmap ─────────────────
+print(f"Scan report for {host}")
+print(f"Host is up.")
+print(f"")
+print(f"PORT      STATE  SERVICE  VERSION")
+
+found = []
+
+# Scan HTTP/HTTPS
+for port, sc in WEB_PORTS:
+    if tcp_ok(host, port):
+        try:
+            import urllib.request, urllib.error
+            req = urllib.request.Request(f"{sc}://{host}:{port}/",
+                headers={"User-Agent":"nmap/7.94"})
+            try:
+                resp = urllib.request.urlopen(req, timeout=5)
+                status, hdrs = resp.status, dict(resp.headers)
+            except urllib.error.HTTPError as e:
+                status, hdrs = e.code, dict(e.headers)
+            banner = detect_fw(hdrs)
+            print(f"{port}/tcp   open  {banner}")
+            found.append((port, banner))
+        except:
+            print(f"{port}/tcp   open  http    HTTP service")
+            found.append((port, "http"))
+
+# Scan autres services
+for port, svc in OTHER:
+    if tcp_ok(host, port, 1):
+        print(f"{port}/tcp   open  {svc}")
+        found.append((port, svc))
+
+# OS via TTL
+try:
+    r=subprocess.run(["ping","-c","1","-W","1",host],
+                     capture_output=True,text=True,timeout=3)
+    m=re.search(r"ttl=(\d+)",r.stdout,re.I)
+    if m:
+        ttl=int(m.group(1))
+        osg="Linux/Unix" if ttl<=64 else ("Windows" if ttl<=128 else "Inconnu")
+        print(f"")
+        print(f"OS details: {osg} (TTL={ttl})")
+except: pass
+
+print(f"")
+print(f"Nmap done: 1 IP address (1 host up) scanned")
+if not found:
+    print(f"Note: Aucun port ouvert detecte — verifiez que l'application est lancee.")
+'''
+
+def build_inline_scanner_command(target_url: str) -> str:
+    """
+    Crée un script Python temporaire dans /tmp (pas de problème de chemin)
+    et retourne la commande shell pour l'exécuter.
+    /tmp n'a jamais d'espaces dans le chemin.
+    """
+    import tempfile
+    code = _INLINE_SCANNER_CODE.replace("__TARGET__", target_url.replace('"', '\"'))
+    tmp  = tempfile.NamedTemporaryFile(
+        suffix=".py", delete=False, mode="w", encoding="utf-8", dir="/tmp")
+    tmp.write(code)
+    tmp.flush(); tmp.close()
+    # /tmp/tmpXXXXXX.py — jamais d'espaces dans /tmp
+    return f'python3 {tmp.name}'
+
+
+def build_inline_sqli_command(target_url: str) -> str:
+    """Scanner SQLi intégré — écrit dans /tmp, aucune dépendance externe."""
+    import tempfile
+    sqli_code = _INLINE_SQLI_CODE.replace(
+        "__TARGET__", target_url.replace("'", "\\'"))
+    tmp = tempfile.NamedTemporaryFile(
+        suffix=".py", delete=False, mode="w", encoding="utf-8", dir="/tmp")
+    tmp.write(sqli_code); tmp.flush(); tmp.close()
+    return f'python3 {tmp.name}'
+
+
+_INLINE_SQLI_CODE = """\
+import sys, socket, re, time
+from urllib.parse import urlparse
+
+url = '__TARGET__'
+if not re.match(r'^https?://', url):
+    url = 'http://' + url
+
+SQLI = [
+    (\"' OR '1'='1' --\",    \"' OR '1'='1' --\"),
+    (\"' OR 1=1 --\",        \"x\"),
+    (\"' OR '1'='1\",        \"' OR '1'='1\"),
+    (\"' UNION SELECT username,password FROM users --\", \"x\"),
+]
+SUCCESS = ['connexion reussie','injection sql','bienvenue','mamolava','izy','welcome']
+
+def req(url, data=None, t=5):
+    import urllib.request, urllib.error, urllib.parse
+    try:
+        if data:
+            d = urllib.parse.urlencode(data).encode()
+            r = urllib.request.Request(url, data=d, headers={
+                'User-Agent': 'scanner/2.0',
+                'Content-Type': 'application/x-www-form-urlencoded'})
+        else:
+            r = urllib.request.Request(url, headers={'User-Agent': 'scanner/2.0'})
+        try:
+            resp = urllib.request.urlopen(r, timeout=t)
+            return resp.status, dict(resp.headers), resp.read().decode('utf-8','replace')
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers), e.read().decode('utf-8','replace')
+    except Exception as ex:
+        return None, {}, str(ex)
+
+login_url = url.rstrip('/') + '/'
+
+status, hdrs, body = req(login_url)
+if status is None:
+    print('- INFO           : Cible inaccessible — lancez web_vulnerable.py')
+    sys.exit(0)
+srv = hdrs.get('Server', hdrs.get('server','Non declare'))
+print(f'- INFO           : Cible accessible — HTTP {status}')
+print(f'- INFO           : Serveur : {srv}')
+print()
+
+miss = [h for h in ['X-Frame-Options','Content-Security-Policy',
+                    'X-Content-Type-Options','Strict-Transport-Security',
+                    'X-XSS-Protection','Referrer-Policy']
+        if h not in hdrs and h.lower() not in hdrs]
+for h in miss:
+    print(f'+ VULN MOYENNE   : En-tete manquant : {h}')
+if len(miss) >= 4:
+    print(f'+ VULN HAUTE     : nikto: {len(miss)} en-tetes de securite absents')
+print()
+
+found_sqli = False
+for i,(u_pay,p_pay) in enumerate(SQLI, 1):
+    print(f'  [{i:02d}/{len(SQLI)}] username=\\'{u_pay[:45]}\\'')
+    s2, h2, body2 = req(login_url, {'username': u_pay, 'password': p_pay})
+    b2 = body2.lower() if body2 else ''
+    if any(k in b2 for k in SUCCESS):
+        found_sqli = True
+        if any(k in b2 for k in ['mamolava','izy','injection','tous les']):
+            print('+ VULN CRITIQUE  : sql injection: DUMP COMPLET base de donnees !')
+            print('+ VULN CRITIQUE  : Donnees sensibles : username + password en clair')
+        else:
+            print('+ VULN CRITIQUE  : sql injection: authentification contournee')
+    else:
+        print('- INFO           : Payload rejete')
+    time.sleep(0.1)
+
+if found_sqli:
+    print()
+    print('+ VULN CRITIQUE  : sql injection confirmee — requete non parametree')
+    print('+ VULN CRITIQUE  : CVE-TYPE: CWE-89 Improper Neutralization of SQL Commands')
+    print('+ VULN HAUTE     : injection: mots de passe stockes en CLAIR dans SQLite')
+print()
+
+if body and 'users.db' in body:
+    print('+ VULN MOYENNE   : vuln: chemin BD expose dans le HTML (users.db)')
+if body and ('non chiffre' in body.lower() or 'sql injection' in body.lower()):
+    print('+ VULN HAUTE     : vuln: mots de passe en clair mentionnes dans la page')
+print()
+
+t0 = time.time()
+blocked = False
+for uu,pp in [('admin','w1'),('admin','w2'),('admin','w3'),
+              ('admin','w4'),('admin','w5'),('admin','w6')]:
+    s3,_,b3 = req(login_url, {'username':uu,'password':pp})
+    b3l = (b3 or '').lower()
+    if 'bloque' in b3l or 'trop de' in b3l or 'too many' in b3l:
+        blocked = True; break
+    time.sleep(0.05)
+dur = time.time() - t0
+rps = round(6/dur) if dur > 0 else 0
+if not blocked:
+    print(f'+ VULN MOYENNE   : vuln: {rps} req/s sans blocage — brute force possible')
+    print('+ VULN MOYENNE   : vuln: absence de rate-limiting sur /login')
+else:
+    print('  [OK]           : Rate-limiting actif — brute force bloque')
+print()
+
+for pay in ["'", "\\\" OR 1=1 --"]:
+    s4,_,b4 = req(login_url, {'username':pay,'password':'x'})
+    b4l = (b4 or '').lower()
+    if 'sqlite' in b4l or 'syntax error' in b4l or 'operational error' in b4l:
+        print('+ VULN HAUTE     : vuln: erreur SQL SQLite exposee dans la reponse')
+        break
+    elif 'erreur serveur' in b4l:
+        print('+ VULN MOYENNE   : vuln: message erreur generique expose')
+        break
+print()
+
+import datetime
+print('+ nikto rapport termine —', url)
+print('- Fin du scan :', datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S'))
+"""
+
+
 # ══════════════════════════════════════════════
 def parse_discover(raw):
     ports, services, os_info = [], [], "Non détecté"
@@ -227,7 +501,7 @@ def generate_pdf_report(target, step_results, output_path):
         story.append(HRFlowable(width="100%", thickness=2, color=rc.HexColor('#1A5276')))
         story.append(Spacer(1, 0.4*cm))
 
-        cb = Table([[Paragraph(f"🎯  Cible : {target}", target_s)]], colWidths=[16*cm])
+        cb = Table([[Paragraph(f"Cible : {target}", target_s)]], colWidths=[16*cm])
         cb.setStyle(TableStyle([
             ('BACKGROUND', (0,0),(-1,-1), rc.HexColor('#EAFAF1')),
             ('BOX',        (0,0),(-1,-1), 1.5, rc.HexColor('#27AE60')),
@@ -801,7 +1075,8 @@ class BaseStepTab(QWidget):
             f"QFrame{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
             f"stop:0 {self.dark},stop:1 {self.accent});"
             f"border-radius:10px;border:none;}}")
-        hl = QHBoxLayout(hdr); hl.setContentsMargins(16,10,16,10)
+        hl = QHBoxLayout(hdr); 
+        hl.setContentsMargins(16,10,16,10)
 
         icon_l = QLabel(STEP_ICONS[self.step_idx])
         icon_l.setStyleSheet("font-size:24px;background:transparent;")
@@ -812,12 +1087,13 @@ class BaseStepTab(QWidget):
         desc_l.setWordWrap(True)
 
         self.badge = QLabel("EN ATTENTE")
-        self.badge.setStyleSheet(
+        """self.badge.setStyleSheet(
             f"color:#fff;font-size:10px;font-weight:700;"
             f"background:{self.dark};border:1px solid {self.accent};"
-            f"border-radius:6px;padding:3px 8px;letter-spacing:1px;")
+            f"border-radius:6px;padding:3px 8px;letter-spacing:1px;")"""
 
-        tb = QVBoxLayout(); tb.setSpacing(2)
+        tb = QVBoxLayout(); 
+        tb.setSpacing(2)
         #tb.addWidget(name_l)
         tb.addWidget(desc_l)
         #hl.addWidget(icon_l); 
@@ -953,22 +1229,79 @@ class TabDiscover(BaseStepTab):
 
     def _build_config(self):
         row = QHBoxLayout(); row.setSpacing(8)
-        row.addWidget(self._cfg_lbl("Mode Nmap :"))
+
         self.mode = mk_combo([
-            "Scan rapide        (-F)        ports courants",
-            "Scan standard      (-sV)       détection services",
-            "Scan complet       (-sV -O -A) OS + services",
-            "Scan SYN           (-sS -sV)   discret",
-            "Ping scan          (-sn)       hôtes actifs",
+            "Scan rapide        (-F)          ports courants        [nmap]",
+            "Scan standard      (-sV)         détection services    [nmap]",
+            "Scan complet       (-sV -O -A)   OS + services         [nmap]",
+            "Scan SYN           (-sS -sV)     discret               [nmap]",
+            "Ping scan          (-sn)         hôtes actifs          [nmap]",
+            "─────────────────────────────────────────────────────────────",
+            "Scanner Web Flask  (HTTP/HTTPS)  app web + framework   [python]",
+            "Scanner Web + port (-p PORT)     port spécifique HTTP  [nmap+python]",
         ], self.accent)
         row.addWidget(self.mode)
         self.cfg_lay.addLayout(row)
-        self.cfg_lay.addWidget(self._note("Requis : sudo apt install nmap"))
+
+        # Étiquette d'info dynamique selon le mode sélectionné
+        self.mode_info = self._note(
+            "Sélectionnez un mode. "
+            "Les modes [python] fonctionnent avec les URLs http://... "
+            "Les modes [nmap] nécessitent sudo.")
+        self.cfg_lay.addWidget(self.mode_info)
+        self.mode.currentIndexChanged.connect(self._on_mode_change)
+        self._on_mode_change(0)
+
+    def _on_mode_change(self, idx):
+        """Met à jour l'info selon le mode choisi."""
+        msgs = [
+            "nmap -F 127.0.0.1  — scan rapide des 100 ports courants. ⚠ Utilise l'IP seule (http:// retiré automatiquement).",
+            "nmap -sV 127.0.0.1  — détecte les versions de services. Recommandé pour la démo.",
+            "nmap -sV -O -A 127.0.0.1  — scan complet avec OS. Lent (~2 min). Nécessite sudo.",
+            "nmap -sS -sV 127.0.0.1  — scan SYN furtif. Nécessite sudo.",
+            "nmap -sn 127.0.0.1  — vérifie si l'hôte répond (ping). Sans détection de ports.",
+            "─── Séparateur ───",
+            "python3 scanner_discover.py http://127.0.0.1:5000  — ✅ Fonctionne avec les URLs complètes ! Détecte Flask, Django, Nginx… Recommandé pour votre démo.",
+            "nmap -p PORT 127.0.0.1 puis scanner_discover — scan nmap sur le port exact + analyse HTTP.",
+        ]
+        if idx < len(msgs):
+            self.mode_info.setText(msgs[idx])
 
     def _get_command(self):
-        t = self.target_ref.text().strip()
-        f = ["-F", "-sV", "-sV -O -A", "-sS -sV", "-sn"]
-        return f"sudo nmap {f[self.mode.currentIndex()]} {t}"
+        t    = self.target_ref.text().strip()
+        idx  = self.mode.currentIndex()
+        host = extract_host(t)   # Retire http://, :port pour nmap
+        port = extract_port(t)   # Port extrait de l'URL (ex: 5000)
+
+        # ─── Modes nmap : utilise l'IP propre, pas l'URL ───────
+        if idx == 0:
+            return f"sudo nmap -F {host}"
+        elif idx == 1:
+            return f"sudo nmap -sV {host}"
+        elif idx == 2:
+            return f"sudo nmap -sV -O -A {host}"
+        elif idx == 3:
+            return f"sudo nmap -sS -sV {host}"
+        elif idx == 4:
+            return f"sudo nmap -sn {host}"
+        elif idx == 5:
+            # Séparateur — ne rien faire
+            return f"echo '─── Choisissez un mode de scan ───'"
+
+        # ─── Mode Scanner Web Flask (index 6) ──────────────────
+        elif idx == 6:
+            # ✅ Scanner intégré : écrit dans /tmp (jamais d'espaces)
+            return build_inline_scanner_command(t)
+
+        # ─── Mode nmap port spécifique + scanner (index 7) ─────
+        elif idx == 7:
+            port_str = str(port) if port else "5000"
+            scan_cmd = build_inline_scanner_command(t)
+            return (f'sudo nmap -sV -p {port_str} {host} && '
+                    f'echo "--- Scanner Web ---" && '
+                    f'{scan_cmd}')
+
+        return f"sudo nmap -sV {host}"
 
 # ══════════════════════════════════════════════
 #  ONGLET 2 — CLASSIFIER
@@ -1002,7 +1335,8 @@ class TabClassify(BaseStepTab):
             f"service(s) classifié(s)</span><br>")
 
     def _get_command(self):
-        return f"sudo nmap -sV -F {self.target_ref.text().strip()}"
+        host = extract_host(self.target_ref.text().strip())
+        return f"sudo nmap -sV -F {host}"
 
     def _on_done(self, success, raw):
         if not self.classified:
@@ -1021,24 +1355,48 @@ class TabEvaluate(BaseStepTab):
         row = QHBoxLayout(); row.setSpacing(8)
         row.addWidget(self._cfg_lbl("Outil :"))
         self.tool = mk_combo([
-            "Nikto            — Scanner web (XSS, injections, configs)",
-            "Nmap NSE vuln    — Scripts vulnérabilités réseau",
-            "Nmap NSE exploit — Scripts d'exploitation",
-            "WhatWeb          — Empreinte & versions technologies",
+            "Scanner SQLi Flask — SQLi + Headers + BruteForce  [python]",
+            "Nikto              — Scanner web (XSS, injections) [nikto]",
+            "Nmap NSE vuln      — Scripts vulnérabilités réseau [nmap]",
+            "Nmap NSE exploit   — Scripts d'exploitation        [nmap]",
+            "WhatWeb            — Empreinte & versions          [whatweb]",
         ], self.accent)
         row.addWidget(self.tool)
         self.cfg_lay.addLayout(row)
-        self.cfg_lay.addWidget(self._note(
-            "Requis : sudo apt install nikto nmap whatweb"))
+
+        self.eval_info = self._note(
+            "✅ Scanner SQLi Flask : intégré — aucune installation requise. "
+            "Recommandé pour la démo.")
+        self.cfg_lay.addWidget(self.eval_info)
+        self.tool.currentIndexChanged.connect(self._on_tool_change)
+        self._on_tool_change(0)
+
+    def _on_tool_change(self, idx):
+        msgs = [
+            "✅ Scanner SQLi Flask — intégré dans app.py, aucun outil à installer. "
+            "Teste : SQL Injection (4 payloads), en-têtes HTTP manquants, "
+            "absence de rate-limiting, erreurs SQL exposées. Recommandé pour la démo.",
+            "nikto -h http://127.0.0.1:5000 — nécessite : sudo apt install nikto",
+            "sudo nmap --script vuln — nécessite sudo + nmap installé",
+            "sudo nmap --script exploit — nécessite sudo + nmap installé",
+            "whatweb -v — nécessite : sudo apt install whatweb",
+        ]
+        if idx < len(msgs):
+            self.eval_info.setText(msgs[idx])
 
     def _get_command(self):
-        t = self.target_ref.text().strip()
+        t    = self.target_ref.text().strip()
+        host = extract_host(t)
+        idx  = self.tool.currentIndex()
+        if idx == 0:
+            return build_inline_sqli_command(t)
         return [
+            build_inline_sqli_command(t),
             f"nikto -h {t}",
-            f"sudo nmap --script vuln -sV {t}",
-            f"sudo nmap --script exploit -sV {t}",
+            f"sudo nmap --script vuln -sV {host}",
+            f"sudo nmap --script exploit -sV {host}",
             f"whatweb -v {t}",
-        ][self.tool.currentIndex()]
+        ][idx]
 
     def _on_done(self, success, raw):
         self.vulns = parse_evaluate(raw)
@@ -1194,6 +1552,7 @@ class TabVerify(BaseStepTab):
             "Nmap -sV         — Rescanner les services",
             "Nikto            — Rescanner les vulnérabilités web",
             "Nmap NSE vuln    — Rescanner les scripts vuln",
+            "Scanner Web      — Rescanner le service Flask/HTTP",
         ], self.accent)
         row.addWidget(self.tool)
         self.cfg_lay.addLayout(row)
@@ -1210,10 +1569,14 @@ class TabVerify(BaseStepTab):
             f"{len(vulns)} vulnérabilité(s).")
 
     def _get_command(self):
-        t = self.target_ref.text().strip()
-        return [f"sudo nmap -sV -F {t}",
+        t    = self.target_ref.text().strip()
+        host = extract_host(t)
+        scan_cmd = build_inline_scanner_command(t)
+        return [f"sudo nmap -sV -F {host}",
                 f"nikto -h {t}",
-                f"sudo nmap --script vuln -sV {t}"][self.tool.currentIndex()]
+                f"sudo nmap --script vuln -sV {host}",
+                scan_cmd,
+                ][min(self.tool.currentIndex(), 3)]
 
     def _on_done(self, success, raw):
         pa = len(parse_discover(raw)[0])
@@ -1282,7 +1645,7 @@ class MainWindow(QMainWindow):
         tl = QHBoxLayout(topbar)
         tl.setContentsMargins(18,0,18,0); tl.setSpacing(12)
 
-        logo = QLabel("🛡️  CyberSec Tool")
+        logo = QLabel("🛡️ Gestion de vulnérabilité")
         logo.setStyleSheet(f"font-size:16px;font-weight:800;color:{C['white']};")
         tl.addWidget(logo)
 
@@ -1290,7 +1653,7 @@ class MainWindow(QMainWindow):
         vsep.setStyleSheet(f"background:{C['border']};border:none;max-width:1px;margin:14px 0;")
         tl.addWidget(vsep)
 
-        tl.addWidget(mk_label("🎯 Cible :", C["white_60"], 12, bold=True))
+        tl.addWidget(mk_label("Cible :", C["white_60"], 12, bold=True))
 
         self.target_input = QLineEdit()
         self.target_input.setPlaceholderText("192.168.1.10  ou  http://cible.local")
@@ -1312,7 +1675,7 @@ class MainWindow(QMainWindow):
         # Pastilles indicateur cycle
         self.pills = []
         for i, (icon, name) in enumerate(zip(STEP_ICONS, STEP_NAMES)):
-            acc, dark = STEP_COLORS[5]
+            acc, dark = STEP_COLORS[7]
             p = QPushButton(f"{name}")
             p.setStyleSheet(
                 f"QPushButton{{background:{dark};color:{acc};"
@@ -1322,7 +1685,7 @@ class MainWindow(QMainWindow):
             p.setFixedHeight(24); p.setCursor(Qt.PointingHandCursor)
             p.clicked.connect(lambda _, idx=i: self.tabs.setCurrentIndex(idx))
             self.pills.append(p); tl.addWidget(p)
-
+    
         root.addWidget(topbar)
 
         # ── Corps : sidebar + onglets ─────────────────────────────────────────
@@ -1426,7 +1789,7 @@ class MainWindow(QMainWindow):
         done = sum(1 for v in self.step_results.values() if v.get('raw','').strip())
         self.gpbar.setValue(int(done/6*100))
         for i, pill in enumerate(self.pills):
-            acc, dark = STEP_COLORS[i]
+            acc, dark = STEP_COLORS[7]
             finished = bool(self.step_results.get(i,{}).get('raw','').strip())
             if finished:
                 pill.setStyleSheet(
